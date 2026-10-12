@@ -1,4 +1,5 @@
 EXE_INC = \
+    -include ../../VoF/tpfVoFRename.H \
     -I$(LIB_SRC)/finiteVolume/lnInclude \
     -I$(LIB_SRC)/thermophysicalModels/basic/lnInclude \
     -I$(LIB_SRC)/thermophysicalModels/reactionThermo/lnInclude \

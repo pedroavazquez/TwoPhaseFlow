@@ -1,5 +1,6 @@
 
 EXE_INC = \
+    -include ../../src/VoF/tpfVoFRename.H \
     -I. \
     -I./fluid \
     -I./solid \

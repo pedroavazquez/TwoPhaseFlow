@@ -1,4 +1,5 @@
 EXE_INC = \
+    -include ../../src/VoF/tpfVoFRename.H \
     -I$(FOAM_UTILITIES)/preProcessing/setAlphaField/alphaFieldFunctions/lnInclude \
     -I$(LIB_SRC)/finiteVolume/lnInclude \
     -I$(LIB_SRC)/dynamicMesh/lnInclude \
