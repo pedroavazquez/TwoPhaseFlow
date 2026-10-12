@@ -1,0 +1,422 @@
+#!/bin/sh
+#------------------------------------------------------------------------------
+# Axisymmetric oscillating drop (Rayleigh-Lamb mode l) for gfmInterFlow.
+#
+# Same wedge mesh as staticDropAxi (axis = y, radial = x, half-angle 2.5 deg,
+# axial 0 <= y <= 1, radial 0 <= r <= 0.5, N x N/2 cells, Delta = 1/N).
+# Initial shape (exact volume fractions, zero velocity):
+#     r(theta) = R0 [1 + eps P_l(cos theta)],   R = 0.25 equivalent radius,
+# centred on the axis at y = 0.5, R0 such that the volume is 4/3 pi R^3.
+#
+# Physics (defaults): rho1/rho2 = 1000/1, nu1 = 5e-4, nu2 = 5e-3
+# (mu1/mu2 = 100), sigma = 1, g = 0. For l = 2 (Lamb, with outer fluid):
+#     omega0^2 = l(l-1)(l+1)(l+2) sigma / (R^3 [(l+1) rho1 + l rho2]) -> 0.5117
+#     gamma    = (2l+1)[(l+1)(l-1) mu1 + l(l+2) mu2]
+#                / (R^2 [(l+1) rho1 + l rho2])                        -> 0.0410
+#     period 2 pi / sqrt(omega0^2 - gamma^2) = 8.80 s, Oh = mu1/sqrt(rho1 sigma R) = 0.032
+#
+# Metric written every time step by the coded function object 'dropShape'
+# (postProcessing/dropShape/<t0>/dropShape.dat):
+#     vol     drop volume (wedge)            sum alpha V
+#     Q       moment  sum alpha V r^2 P_2    = sum alpha V ((y-yc)^2 - s^2/2)
+#     eps     Q / Q_lin, Q_lin = (theta/2pi) 4 pi R^5/5  (linear P_2 amplitude)
+#     halfL   half axial length from the axis column      0.5 dy sum alpha
+#     Req     equatorial radius from the two central rows
+# fitOscillation.py fits  c + A exp(-gamma t) cos(omega t + phi)  to eps(t).
+#
+# Usage:
+#   ./Allrun [model ...]                 (default: heightFunction)
+# Environment (defaults in brackets):
+#   RES       axial cells, list allowed (even numbers)   ["40 80 160"]
+#   ENDTIME   end time [s]                               [18]   (~2 periods)
+#   DT        fixed time step [s]; empty = 0.25 x capillary limit, rounded
+#             sqrt((rho1+rho2) Delta^3/(4 pi sigma))     []
+#   NWRITE    number of field writes per run             [36]
+#   NPROCS    MPI ranks per run (1 = serial)             [1]
+#   TIMEOUT   wall-clock limit per run [s]               [86400]
+#   GFM       ghostFluid switch list                     ["off"]
+#   MODE      Legendre mode l                            [2]
+#   EPS       relative amplitude                         [0.05]
+#   NU1, NU2  kinematic viscosities                      [5e-4, 5e-3]
+#   DDT       ddtSchemes default, e.g. "CrankNicolson 0.9" [base case: Euler]
+#   TAG       suffix for the case name (e.g. _dt2, _CN)  []
+#
+# Examples:
+#   ./Allrun
+#   RES="40 80" GFM="off on" ./Allrun
+#   EPS=0.025 RES=80 ./Allrun            (nonlinear frequency shift check)
+#------------------------------------------------------------------------------
+cd "${0%/*}" || exit 1
+. "${WM_PROJECT_DIR:?}"/bin/tools/RunFunctions
+
+base=../../../../run/velocityStaticCircle
+
+res_list=${RES:-"40 80 160"}
+endTime=${ENDTIME:-18}
+dtUser=${DT:-}
+nWrite=${NWRITE:-36}
+nProcs=${NPROCS:-1}
+tmax=${TIMEOUT:-86400}
+gfm_list=${GFM:-"off"}
+lmode=${MODE:-2}
+eps=${EPS:-0.05}
+nu1=${NU1:-5e-4}
+nu2=${NU2:-5e-3}
+ddt=${DDT:-}
+tag=${TAG:-}
+here=$(pwd)
+
+# fixed physics of this test
+R=0.25
+yc=0.5
+rho1=1000
+rho2=1
+sigma=1
+wedgeDeg=5
+
+if [ ! -d "$base/0.orig" ]
+then
+    echo "Error: base case (with 0.orig) not found: $base" 1>&2
+    exit 1
+fi
+
+models=${*:-"heightFunction"}
+
+writeInterval=$(awk -v t="$endTime" -v n="$nWrite" 'BEGIN { printf "%.10g", t/n }')
+thetaRad=$(awk -v d="$wedgeDeg" 'BEGIN { printf "%.12g", d*atan2(0,-1)/180 }')
+# linear moment of a P_2 shape of unit amplitude, per wedge
+qLin=$(awk -v th="$thetaRad" -v R="$R" \
+    'BEGIN { pi = atan2(0,-1); printf "%.12g", th/(2*pi)*4*pi/5*R^5 }')
+
+echo "Axisymmetric oscillating drop: models [$models], RES [$res_list], GFM [$gfm_list]," \
+     "l = $lmode, eps = $eps, nu1 = $nu1, nu2 = $nu2, endTime $endTime, NPROCS $nProcs"
+
+for res in $res_list
+do
+if [ -n "$dtUser" ]
+then
+    deltaT=$dtUser
+else
+    deltaT=$(awk -v n="$res" -v r1="$rho1" -v r2="$rho2" -v s="$sigma" '
+        BEGIN {
+            pi = atan2(0,-1); d = 1.0/n
+            dt = 0.25*sqrt((r1 + r2)*d^3/(4*pi*s))
+            e = 10^int(log(dt)/log(10) - 1)
+            m = int(dt/e)
+            while (m >= 10) { m = int(m/10); e *= 10 }
+            printf "%.3g", m*e
+        }')
+fi
+
+for model in $models
+do
+    for gfm in $gfm_list
+    do
+        case=case_${model}_GFM-${gfm}_N${res}${tag}
+        echo "=== $case  (deltaT $deltaT)"
+        rm -rf "$case"
+        mkdir "$case"
+
+        cp -r "$base"/0.orig "$base"/constant "$base"/system "$case"/
+        rm -rf "$case"/constant/polyMesh
+
+        nR=$((res / 2))
+        cat > "$case"/system/blockMeshDict <<BLOCKMESH
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      blockMeshDict;
+}
+
+scale 1;
+
+// axis = y, radial = x, wedge half-angle 2.5 deg (r_outer = 0.5)
+vertices
+(
+    (0          0  0)
+    (0.4995241108 0  0.0218096937)
+    (0.4995241108 0 -0.0218096937)
+    (0          1  0)
+    (0.4995241108 1  0.0218096937)
+    (0.4995241108 1 -0.0218096937)
+);
+
+blocks
+(
+    hex (0 3 4 1 0 3 5 2) ($res $nR 1) simpleGrading (1 1 1)
+);
+
+boundary
+(
+    axis
+    {
+        type empty;
+        faces ((0 3 3 0));
+    }
+    rim
+    {
+        type patch;
+        faces
+        (
+            (0 1 2 0)
+            (1 2 5 4)
+            (3 4 5 3)
+        );
+    }
+    front
+    {
+        type wedge;
+        faces ((0 1 4 3));
+    }
+    back
+    {
+        type wedge;
+        faces ((0 3 5 2));
+    }
+);
+BLOCKMESH
+
+        rm -rf "$case"/0.orig
+        mkdir "$case"/0.orig
+        writeField()
+        {
+            # $1 name, $2 class, $3 dimensions, $4 internal value, $5 rim BC
+            cat > "$case"/0.orig/"$1" <<FIELD
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       $2;
+    object      $1;
+}
+
+dimensions      $3;
+
+internalField   uniform $4;
+
+boundaryField
+{
+    rim
+    {
+        $5
+    }
+    axis
+    {
+        type            empty;
+    }
+    "(front|back)"
+    {
+        type            wedge;
+    }
+}
+FIELD
+        }
+        writeField U            volVectorField "[0 1 -1 0 0 0 0]" "(0 0 0)" "type slip;"
+        writeField alpha.phase1 volScalarField "[0 0 0 0 0 0 0]"  0        "type zeroGradient;"
+        writeField p            volScalarField "[1 -1 -2 0 0 0 0]" 0       "type calculated; value uniform 0;"
+        writeField p_rgh        volScalarField "[1 -1 -2 0 0 0 0]" 0       "type fixedFluxPressure; value uniform 0;"
+
+        cd_=$case/system/controlDict
+        foamDictionary "$cd_" -entry application    -set gfmInterFlow > /dev/null
+        foamDictionary "$cd_" -entry endTime        -set "$endTime"   > /dev/null
+        foamDictionary "$cd_" -entry deltaT         -set "$deltaT"    > /dev/null
+        foamDictionary "$cd_" -entry adjustTimeStep -set no           > /dev/null
+        foamDictionary "$cd_" -entry writeControl   -set runTime      > /dev/null
+        foamDictionary "$cd_" -entry writeInterval  -set "$writeInterval" > /dev/null
+        foamDictionary "$cd_" -entry writeFormat    -set binary       > /dev/null
+        foamDictionary "$cd_" -entry functions      -remove > /dev/null 2>&1
+
+        cat >> "$cd_" <<'FUNCS'
+
+functions
+{
+    #include "dropFunctions"
+}
+FUNCS
+
+        # Function objects. Unquoted here-document: shell variables are
+        # substituted, '\$' and '\\' give a literal '$' and '\'.
+        cat > "$case"/system/dropFunctions <<DROPFUNCS
+// Oscillating-drop metrics, evaluated every time step
+
+minMax
+{
+    type            fieldMinMax;
+    libs            (fieldFunctionObjects);
+    fields          (U p);
+    location        no;
+    mode            magnitude;
+    writeControl    timeStep;
+    writeInterval   1;
+}
+
+dropShape
+{
+    type            coded;
+    libs            (utilityFunctionObjects);
+    name            dropShape;
+
+    codeInclude
+    #{
+        #include "volFields.H"
+        #include "OFstream.H"
+        #include "OSspecific.H"
+    #};
+
+    codeOptions
+    #{
+        -I\$(LIB_SRC)/finiteVolume/lnInclude \\
+        -I\$(LIB_SRC)/meshTools/lnInclude
+    #};
+
+    codeLibs
+    #{
+        -lfiniteVolume \\
+        -lmeshTools
+    #};
+
+    codeData
+    #{
+        autoPtr<OFstream> osPtr_;
+    #};
+
+    codeExecute
+    #{
+        const fvMesh& mesh = refCast<const fvMesh>(obr_);
+        const volScalarField& alpha =
+            mesh.lookupObject<volScalarField>("alpha.phase1");
+        const scalarField& V = mesh.cellVolumes();
+        const vectorField& C = mesh.cellCentres();
+
+        const scalar yc = $yc;
+        const scalar dy = 1.0/$res;
+        const scalar theta = $thetaRad;
+        const scalar qLin = $qLin;
+
+        scalar vol = 0, Q = 0, sumAxis = 0, volEq = 0;
+        forAll(C, celli)
+        {
+            const scalar a = alpha[celli];
+            const scalar aV = a*V[celli];
+            const scalar dyc = C[celli].y() - yc;
+            const scalar s2 = sqr(C[celli].x()) + sqr(C[celli].z());
+
+            vol += aV;
+            Q += aV*(sqr(dyc) - 0.5*s2);
+
+            // axis column (axis prisms): centroids at x = 2/3 dx < dy
+            if (C[celli].x() < dy)
+            {
+                sumAxis += a;
+            }
+            // the two rows touching y = yc
+            if (mag(dyc) < dy)
+            {
+                volEq += aV;
+            }
+        }
+        reduce(vol, sumOp<scalar>());
+        reduce(Q, sumOp<scalar>());
+        reduce(sumAxis, sumOp<scalar>());
+        reduce(volEq, sumOp<scalar>());
+
+        if (Pstream::master())
+        {
+            if (!osPtr_)
+            {
+                const fileName dir =
+                    mesh.time().globalPath()/"postProcessing"/"dropShape"
+                   /mesh.time().timeName();
+                mkDir(dir);
+                osPtr_.reset(new OFstream(dir/"dropShape.dat"));
+                osPtr_().precision(12);
+                osPtr_()
+                    << "# Time vol Q eps halfL Req" << nl;
+            }
+
+            // sector of half-angle theta/2: area theta/2 s^2
+            const scalar Req = Foam::sqrt(volEq/(2*dy*0.5*theta));
+
+            osPtr_()
+                << mesh.time().value() << tab
+                << vol << tab
+                << Q << tab
+                << Q/qLin << tab
+                << 0.5*dy*sumAxis << tab
+                << Req << endl;
+        }
+    #};
+}
+DROPFUNCS
+
+        tp_=$case/constant/transportProperties
+        foamDictionary "$tp_" -entry surfaceForces/surfaceTensionForceModel -set "$model" > /dev/null
+        foamDictionary "$tp_" -entry phase1/nu  -set "[0 2 -1 0 0 0 0] $nu1"  > /dev/null
+        foamDictionary "$tp_" -entry phase1/rho -set "[1 -3 0 0 0 0 0] $rho1" > /dev/null
+        foamDictionary "$tp_" -entry phase2/nu  -set "[0 2 -1 0 0 0 0] $nu2"  > /dev/null
+        foamDictionary "$tp_" -entry phase2/rho -set "[1 -3 0 0 0 0 0] $rho2" > /dev/null
+        foamDictionary "$tp_" -entry sigma -set "[1 0 -2 0 0 0 0] $sigma"     > /dev/null
+        foamDictionary "$tp_" -entry surfaceForces/sigma -set "$sigma"        > /dev/null
+        foamDictionary "$case"/system/fvSolution \
+            -entry PIMPLE/ghostFluid -add "$gfm" > /dev/null
+        if [ -n "$ddt" ]
+        then
+            foamDictionary "$case"/system/fvSchemes \
+                -entry ddtSchemes/default -set "$ddt" > /dev/null
+        fi
+
+        if [ "$nProcs" -gt 1 ]
+        then
+            dp_=$case/system/decomposeParDict
+            foamDictionary "$dp_" -entry numberOfSubdomains -set "$nProcs" > /dev/null
+            foamDictionary "$dp_" -entry method -set scotch > /dev/null
+        fi
+
+        (
+            cd "$case" || exit 1
+            runApplication blockMesh
+            restore0Dir
+
+            foamDictionary system/controlDict -entry writeFormat -set ascii > /dev/null
+            runApplication -s C0 postProcess -func writeCellCentres -time 0
+            python3 "$here"/exactAlphaAxiMode.py 0 "$res" "$R" "$yc" "$wedgeDeg" \
+                "$lmode" "$eps" > log.exactAlphaAxiMode 2>&1 \
+                || { echo "    exactAlphaAxiMode failed:"; cat log.exactAlphaAxiMode; exit 1; }
+            rm -f 0/C 0/Cx 0/Cy 0/Cz
+            foamDictionary system/controlDict -entry writeFormat -set binary > /dev/null
+            touch velocity.foam
+
+            if [ "$nProcs" -gt 1 ]
+            then
+                runApplication decomposePar
+                echo "Running gfmInterFlow on $(pwd) ($nProcs ranks, timeout ${tmax}s)"
+                timeout -k 10 "$tmax" \
+                    mpirun -np "$nProcs" gfmInterFlow -parallel \
+                    > log.gfmInterFlow 2>&1
+            else
+                echo "Running gfmInterFlow on $(pwd) (timeout ${tmax}s)"
+                timeout -k 10 "$tmax" gfmInterFlow > log.gfmInterFlow 2>&1
+            fi
+            status=$?
+
+            if grep -q "^End" log.gfmInterFlow
+            then
+                if [ "$status" -ne 0 ]
+                then
+                    echo "    WARNING: End reached but exit status $status" \
+                         "(check the end of log.gfmInterFlow)"
+                else
+                    echo "    finished OK ($(grep ExecutionTime log.gfmInterFlow | tail -1 | awk '{print $3}') s)"
+                fi
+            else
+                echo "    FAILED (status $status), last lines of the log:" 1>&2
+                tail -n 15 log.gfmInterFlow 1>&2
+            fi
+        )
+    done
+done
+done
+
+python3 ./fitOscillation.py
