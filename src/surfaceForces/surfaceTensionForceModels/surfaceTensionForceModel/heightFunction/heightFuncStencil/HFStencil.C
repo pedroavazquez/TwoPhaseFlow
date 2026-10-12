@@ -32,9 +32,23 @@ void Foam::HFStencil::findCuboids()
 {
     const cellList& cells = mesh_.cells();
     const vectorField& faceCentre = mesh_.faceCentres();
+    const polyBoundaryMesh& pbm = mesh_.boundaryMesh();
 
     scalar angleError0Deg = cos(degToRad(toleranceAngle_));
     scalar angleError90Deg = cos(degToRad(90-toleranceAngle_));
+
+    // Faces on wedge patches (axisymmetric meshes) are tilted by half the
+    // wedge angle. They are not part of the meridional (2D) height-function
+    // stencil, so they are ignored in the cuboid test.
+    auto onWedge = [&](const label facei) -> bool
+    {
+        if (mesh_.isInternalFace(facei))
+        {
+            return false;
+        }
+        const label patchi = pbm.whichPatch(facei);
+        return (patchi >= 0 && isA<wedgePolyPatch>(pbm[patchi]));
+    };
 
     forAll(cells,celli)
     {
@@ -55,6 +69,10 @@ void Foam::HFStencil::findCuboids()
         forAll(c,i)
         {
             const label& faceI = c[i];
+            if (onWedge(faceI))
+            {
+                continue;
+            }
             vector dist = faceCentre[faceI]-cc;
             dist /= mag(dist);
             if (dist.x() >= maxValX)
@@ -65,9 +83,19 @@ void Foam::HFStencil::findCuboids()
             }
         }
 
+        if (maxDir == -1)
+        {
+            isCuboid_[celli] = false;
+            continue;
+        }
+
         forAll(c,i)
         {
             const label& faceI = c[i];
+            if (onWedge(faceI))
+            {
+                continue;
+            }
             vector dist = faceCentre[faceI]-cc;
             dist /= mag(dist);
             scalar angle = mag(n & dist);
@@ -85,7 +113,6 @@ void Foam::HFStencil::findCuboids()
         }
     }
 
-    const polyBoundaryMesh& pbm = mesh_.boundaryMesh();
     forAll(pbm, patchi) // mark on point patches
     {
         const polyPatch& pp = pbm[patchi];
@@ -203,8 +230,41 @@ void Foam::HFStencil::sortStencilToIJKFormat
 
     stencilHF_[celli] = -1;
 
+    const scalar tolOutOfPlane = sin(degToRad(toleranceAngle_));
+
     forAll(CPCstencil,i)
     {
+        // The cell-point-cell stencil of zoneDistribute also contains the
+        // boundary faces that share a point with the cell. On wedge meshes
+        // these are the front/back faces of all 9 cells: they lie out of the
+        // meridional plane and would otherwise be sorted into the same 2D
+        // slots as the cells (wrong heights). Skip them.
+        if (twoDim_)
+        {
+            vector dist = cellCentres[i] - cc;
+            const scalar magDist = mag(dist);
+            if (magDist > VSMALL)
+            {
+                dist /= magDist;
+                bool outOfPlane = false;
+                for (Foam::direction cmpt = 0; cmpt < vector::nComponents; ++cmpt)
+                {
+                    if
+                    (
+                        mesh_.geometricD()[cmpt] == -1
+                     && mag(dist[cmpt]) > tolOutOfPlane
+                    )
+                    {
+                        outOfPlane = true;
+                    }
+                }
+                if (outOfPlane)
+                {
+                    continue;
+                }
+            }
+        }
+
         label labelInIJK = calcPosInStencil(mesh_.C()[celli],cellCentres[i]);
         stencilHF_[celli][labelInIJK] = CPCstencil[i];
     }
@@ -313,7 +373,15 @@ void Foam::HFStencil::updateStencil(const boolList& nextToInterface)
                 );
             }
 
-            if (CPCstencil[celli].size() == 27 || CPCstencil[celli].size() == 9)
+            // 2D: on wedge meshes the stencil also holds the wedge boundary
+            // faces (skipped in sortStencilToIJKFormat), so it is larger
+            // than 9; completeness is checked by min(stencil) == -1 below
+            if
+            (
+                CPCstencil[celli].size() == 27
+             || CPCstencil[celli].size() == 9
+             || (twoDim_ && CPCstencil[celli].size() > 9)
+            )
             {
                 sortStencilToIJKFormat
                 (
