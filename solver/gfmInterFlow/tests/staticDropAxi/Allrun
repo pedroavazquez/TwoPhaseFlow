@@ -1,0 +1,342 @@
+#!/bin/sh
+#------------------------------------------------------------------------------
+# Axisymmetric static drop benchmark for gfmInterFlow / interFlow.
+#
+# Wedge mesh (axis = y, radial = x, half-angle 2.5 deg), domain
+#   axial 0 <= y <= 1, radial 0 <= r <= 0.5,
+# drop of radius R = 0.25 centred on the axis at y = 0.5 (a full sphere),
+# sigma = 1, rho1/rho2 = 1000/1, mu1/mu2 = 10/0.1, g = 0.
+# Same physics as the 3D staticDropMatrix, exact jump 2 sigma/R = 8.
+# Cells: N axial x N/2 radial, so Delta = 1/N and R/Delta = N/4 (as in 3D),
+# at 2D cost: N = 320 is only 51200 cells.
+#
+#   curvature model x force discretisation x mesh resolution
+#
+# constantCurvature (curv 8, exact) checks that CSF/GFM stay balanced-force on
+# the wedge: velocities must remain at round-off level.
+#
+# Metrics written every time step (function objects in system/dropFunctions):
+#   minMax : fieldMinMax of U and p                     -> max|U|(t)
+#   pCore  : volume average of p in cellZone 'core'      (r < R - 3 dx)
+#   pFar   : volume average of p in cellZone 'far'       (r > R + 3 dx)
+# collect.py (same as in staticDropMatrix) gives tables, orders and plots.
+#
+# Usage:
+#   ./Allrun [model ...]
+# Environment (defaults in brackets):
+#   RES       axial cells, list allowed (even numbers)   ["20 40 80"]
+#   ENDTIME   end time [s]                               [0.02]
+#   DT        fixed time step [s]                        [1e-4]
+#   NWRITE    number of field writes per run             [4]
+#   NPROCS    MPI ranks per run (1 = serial)             [1]
+#   TIMEOUT   wall-clock limit per run [s]               [7200]
+#   EXACT     1: exact initial volume fractions (exactAlphaAxi.py),
+#             0: initAlphaField (faceted interface, O(Delta/R) error)  [1]
+#
+# Examples:
+#   ./Allrun constantCurvature heightFunction
+#   RES="40 80 160 320" ./Allrun heightFunction
+#------------------------------------------------------------------------------
+cd "${0%/*}" || exit 1
+. "${WM_PROJECT_DIR:?}"/bin/tools/RunFunctions
+
+base=../../../../run/velocityStaticCircle
+
+res_list=${RES:-"20 40 80"}
+endTime=${ENDTIME:-0.02}
+deltaT=${DT:-1e-4}
+nWrite=${NWRITE:-4}
+nProcs=${NPROCS:-1}
+tmax=${TIMEOUT:-7200}
+exactInit=${EXACT:-1}
+here=$(pwd)
+
+if [ ! -d "$base/0.orig" ]
+then
+    echo "Error: base case (with 0.orig) not found: $base" 1>&2
+    exit 1
+fi
+
+models=${*:-"constantCurvature gradAlpha RDF heightFunction"}
+
+writeInterval=$(awk -v t="$endTime" -v n="$nWrite" 'BEGIN { printf "%.10g", t/n }')
+
+echo "Axisymmetric static drop: models [$models], RES [$res_list], endTime $endTime," \
+     "deltaT $deltaT, NPROCS $nProcs"
+
+for res in $res_list
+do
+for model in $models
+do
+    for gfm in off on
+    do
+        case=case_${model}_GFM-${gfm}_N${res}
+        echo "=== $case"
+        rm -rf "$case"
+        mkdir "$case"
+
+        # Case set-up only, never results
+        cp -r "$base"/0.orig "$base"/constant "$base"/system "$case"/
+        rm -rf "$case"/constant/polyMesh
+
+        # Wedge mesh: N axial x N/2 radial cells, one cell in the wedge
+        nR=$((res / 2))
+        cat > "$case"/system/blockMeshDict <<BLOCKMESH
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      blockMeshDict;
+}
+
+scale 1;
+
+// axis = y, radial = x, wedge half-angle 2.5 deg (r_outer = 0.5)
+vertices
+(
+    (0          0  0)
+    (0.4995241108 0  0.0218096937)
+    (0.4995241108 0 -0.0218096937)
+    (0          1  0)
+    (0.4995241108 1  0.0218096937)
+    (0.4995241108 1 -0.0218096937)
+);
+
+blocks
+(
+    hex (0 3 4 1 0 3 5 2) ($res $nR 1) simpleGrading (1 1 1)
+);
+
+boundary
+(
+    axis
+    {
+        type empty;
+        faces ((0 3 3 0));
+    }
+    rim
+    {
+        type patch;
+        faces
+        (
+            (0 1 2 0)
+            (1 2 5 4)
+            (3 4 5 3)
+        );
+    }
+    front
+    {
+        type wedge;
+        faces ((0 1 4 3));
+    }
+    back
+    {
+        type wedge;
+        faces ((0 3 5 2));
+    }
+);
+BLOCKMESH
+
+        # Initial/boundary fields for the wedge (rim as in the 3D case)
+        rm -rf "$case"/0.orig
+        mkdir "$case"/0.orig
+        writeField()
+        {
+            # $1 name, $2 class, $3 dimensions, $4 internal value, $5 rim BC
+            cat > "$case"/0.orig/"$1" <<FIELD
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       $2;
+    object      $1;
+}
+
+dimensions      $3;
+
+internalField   uniform $4;
+
+boundaryField
+{
+    rim
+    {
+        $5
+    }
+    axis
+    {
+        type            empty;
+    }
+    "(front|back)"
+    {
+        type            wedge;
+    }
+}
+FIELD
+        }
+        writeField U            volVectorField "[0 1 -1 0 0 0 0]" "(0 0 0)" "type slip;"
+        writeField alpha.phase1 volScalarField "[0 0 0 0 0 0 0]"  0        "type zeroGradient;"
+        writeField p            volScalarField "[1 -1 -2 0 0 0 0]" 0       "type calculated; value uniform 0;"
+        writeField p_rgh        volScalarField "[1 -1 -2 0 0 0 0]" 0       "type fixedFluxPressure; value uniform 0;"
+
+        # Drop centred on the axis
+        foamDictionary "$case"/system/initAlphaFieldDict \
+            -entry origin -set "(0 0.5 0)" > /dev/null
+
+        # Zones for the pressure jump: drop core and far field, 3 cells away
+        # from the interface
+        rIn=$(awk -v n="$res" 'BEGIN { printf "%.10g", 0.25 - 3.0/n }')
+        rOut=$(awk -v n="$res" 'BEGIN { printf "%.10g", 0.25 + 3.0/n }')
+        cat > "$case"/system/topoSetDict <<TOPOSET
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      topoSetDict;
+}
+
+actions
+(
+    { name core; type cellSet; action new; source sphereToCell;
+      origin (0 0.5 0); radius $rIn; }
+    { name core; type cellZoneSet; action new; source setToCellZone;
+      set core; }
+
+    { name far; type cellSet; action new; source sphereToCell;
+      origin (0 0.5 0); radius $rOut; }
+    { name far; type cellSet; action invert; }
+    { name far; type cellZoneSet; action new; source setToCellZone;
+      set far; }
+);
+TOPOSET
+
+        # Solver, models, controls
+        cd_=$case/system/controlDict
+        foamDictionary "$cd_" -entry application    -set gfmInterFlow > /dev/null
+        foamDictionary "$cd_" -entry endTime        -set "$endTime"   > /dev/null
+        foamDictionary "$cd_" -entry deltaT         -set "$deltaT"    > /dev/null
+        foamDictionary "$cd_" -entry adjustTimeStep -set no           > /dev/null
+        foamDictionary "$cd_" -entry writeControl   -set runTime      > /dev/null
+        foamDictionary "$cd_" -entry writeInterval  -set "$writeInterval" > /dev/null
+        foamDictionary "$cd_" -entry writeFormat    -set binary       > /dev/null
+        foamDictionary "$cd_" -entry functions      -remove > /dev/null 2>&1
+
+        cat >> "$cd_" <<'FUNCS'
+
+functions
+{
+    #include "dropFunctions"
+}
+FUNCS
+
+        cat > "$case"/system/dropFunctions <<'DROPFUNCS'
+// Static-drop metrics, evaluated every time step
+
+minMax
+{
+    type            fieldMinMax;
+    libs            (fieldFunctionObjects);
+    fields          (U p);
+    location        no;
+    mode            magnitude;
+    writeControl    timeStep;
+    writeInterval   1;
+}
+
+// Pressure inside the drop, away from the interface band
+pCore
+{
+    type            volFieldValue;
+    libs            (fieldFunctionObjects);
+    regionType      cellZone;
+    name            core;
+    operation       volAverage;
+    fields          (p);
+    writeFields     false;
+    log             false;
+    writeControl    timeStep;
+    writeInterval   1;
+}
+
+// Pressure outside the drop, away from the interface band
+pFar
+{
+    type            volFieldValue;
+    libs            (fieldFunctionObjects);
+    regionType      cellZone;
+    name            far;
+    operation       volAverage;
+    fields          (p);
+    writeFields     false;
+    log             false;
+    writeControl    timeStep;
+    writeInterval   1;
+}
+DROPFUNCS
+
+        foamDictionary "$case"/constant/transportProperties \
+            -entry surfaceForces/surfaceTensionForceModel -set "$model" > /dev/null
+        foamDictionary "$case"/constant/transportProperties \
+            -entry surfaceForces/curv -set 8 > /dev/null
+        foamDictionary "$case"/system/fvSolution \
+            -entry PIMPLE/ghostFluid -add "$gfm" > /dev/null
+
+        if [ "$nProcs" -gt 1 ]
+        then
+            dp_=$case/system/decomposeParDict
+            foamDictionary "$dp_" -entry numberOfSubdomains -set "$nProcs" > /dev/null
+            foamDictionary "$dp_" -entry method -set scotch > /dev/null
+        fi
+
+        (
+            cd "$case" || exit 1
+            runApplication blockMesh
+            runApplication topoSet
+            restore0Dir
+            if [ "$exactInit" = 1 ]
+            then
+                # exact fractions; C needed in ASCII once
+                foamDictionary system/controlDict -entry writeFormat -set ascii > /dev/null
+                runApplication -s C0 postProcess -func writeCellCentres -time 0
+                python3 "$here"/exactAlphaAxi.py 0 "$res" 0.25 0.5 5 > log.exactAlphaAxi 2>&1 \
+                    || { echo "    exactAlphaAxi failed:"; cat log.exactAlphaAxi; exit 1; }
+                rm -f 0/C 0/Cx 0/Cy 0/Cz
+                foamDictionary system/controlDict -entry writeFormat -set binary > /dev/null
+            else
+                runApplication initAlphaField
+            fi
+            touch velocity.foam
+
+            if [ "$nProcs" -gt 1 ]
+            then
+                runApplication decomposePar
+                echo "Running gfmInterFlow on $(pwd) ($nProcs ranks, timeout ${tmax}s)"
+                timeout -k 10 "$tmax" \
+                    mpirun -np "$nProcs" gfmInterFlow -parallel \
+                    > log.gfmInterFlow 2>&1
+            else
+                echo "Running gfmInterFlow on $(pwd) (timeout ${tmax}s)"
+                timeout -k 10 "$tmax" gfmInterFlow > log.gfmInterFlow 2>&1
+            fi
+            status=$?
+
+            if grep -q "^End" log.gfmInterFlow
+            then
+                if [ "$status" -ne 0 ]
+                then
+                    echo "    WARNING: End reached but exit status $status" \
+                         "(check the end of log.gfmInterFlow)"
+                else
+                    echo "    finished OK ($(grep ExecutionTime log.gfmInterFlow | tail -1 | awk '{print $3}') s)"
+                fi
+            else
+                echo "    FAILED (status $status), last lines of the log:" 1>&2
+                tail -n 15 log.gfmInterFlow 1>&2
+            fi
+        )
+    done
+done
+done
+
+python3 ./collect.py

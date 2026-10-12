@@ -1,0 +1,8 @@
+case_*/
+exact*/
+dbg*/
+smoke_*/
+check_interFlow/
+timeseries.csv
+*.png
+log.*

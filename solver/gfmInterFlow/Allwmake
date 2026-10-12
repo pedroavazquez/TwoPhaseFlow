@@ -1,0 +1,24 @@
+#!/bin/sh
+# Build gfmInterFlow. Must live in <TwoPhaseFlow>/solver/gfmInterFlow and
+# TwoPhaseFlow's libraries (libVoF, libsurfaceForces) must already be built.
+cd "${0%/*}" || exit 1
+
+if [ -z "$WM_PROJECT_DIR" ]
+then
+    echo "Error: source your OpenFOAM (ESI v2406-v2606) environment first" 1>&2
+    exit 1
+fi
+
+if [ ! -d ../../src/surfaceForces ] || [ ! -d ../../src/VoF ]
+then
+    echo "Error: gfmInterFlow must be placed in <TwoPhaseFlow>/solver/gfmInterFlow" 1>&2
+    exit 1
+fi
+
+if [ ! -d ../../src/surfaceForces/lnInclude ]
+then
+    echo "Error: build TwoPhaseFlow first (./Allwmake in the TwoPhaseFlow root)" 1>&2
+    exit 1
+fi
+
+wmake "$@"
