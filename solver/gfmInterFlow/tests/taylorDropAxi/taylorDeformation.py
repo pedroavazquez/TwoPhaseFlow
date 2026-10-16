@@ -113,7 +113,8 @@ for case in sorted(glob.glob("case_*")):
 
     rows.append((m.group("name") + (m.group("tag") or ""), int(m.group("res")), info["mode"], info["Ca"],
                  Rh, S, info["sigmaE"], Dth, DQs, Daxs, drift,
-                 (d["vol"][-1] - d["vol"][0])/d["vol"][0], t[-1]))
+                 (d["vol"][-1] - d["vol"][0])/d["vol"][0], t[-1],
+                 info.get("aDelta", int(m.group("res"))/8)))
     series[case] = (t, DQ, Dax, Dth)
 
 if not rows:
@@ -123,9 +124,9 @@ if not rows:
 hdr = ("case", "N", "a/Delta", "mode", "Ca", "R", "S", "sigma_e", "D_theory", "D (P2)",
        "err", "D (axis)", "drift", "dVol/Vol", "t_end")
 tab = []
-for (name, res, mode, Ca, Rh, S, se, Dth, DQs, Daxs, drift, dvol, tend) in rows:
+for (name, res, mode, Ca, Rh, S, se, Dth, DQs, Daxs, drift, dvol, tend, ad) in rows:
     Rs = f"{Rh.real:.3g}" if abs(Rh.imag) < 1e-12 else f"{Rh.real:.3g}{Rh.imag:+.3g}i"
-    tab.append((name, str(res), f"{res/8:g}", mode, f"{Ca:g}", Rs, f"{S:g}", f"{se:g}",
+    tab.append((name, str(res), f"{ad:g}", mode, f"{Ca:g}", Rs, f"{S:g}", f"{se:g}",
                 fmt(Dth, "%+.5f"), fmt(DQs, "%+.5f"),
                 fmt((DQs - Dth)/abs(Dth) if Dth else None, "%+.2e"),
                 fmt(Daxs, "%+.5f"), fmt(drift, "%+.1e"), fmt(dvol, "%+.1e"),

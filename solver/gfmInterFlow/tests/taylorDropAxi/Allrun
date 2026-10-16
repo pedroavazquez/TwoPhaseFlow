@@ -40,8 +40,10 @@
 #             Larger SIGMAE = shorter t_e = eps/sigma, weaker charge
 #             convection (electric Reynolds number ~ 1/SIGMAE)   [10]
 #   TAG       suffix for the case name (e.g. _Ca005)  []
-#   FORCEFORM kortewegHelmholtz | maxwellStress       [kortewegHelmholtz]
+#   FORCEFORM maxwellStress | kortewegHelmholtz       [maxwellStress]
 #   EPSI      drop permittivity eps_i (S = eps_i/eps_e, eps_e = 1)   [1]
+#   DOMAIN    domain scale: 0 <= y <= 2 DOMAIN, r <= DOMAIN; walls at
+#             (4 DOMAIN) a; a/Delta = RES/(8 DOMAIN)              [1]
 #   TIMEOUT   wall-clock limit per run [s]           [86400]
 #------------------------------------------------------------------------------
 cd "${0%/*}" || exit 1
@@ -64,9 +66,12 @@ cases=${*:-"prolateDC oblateDC"}
 
 # fixed geometry and flow
 a=0.25
-yc=1
-Ly=2
-Rmax=1
+# domain: 0 <= y <= 2 DOMAIN, r <= DOMAIN; N cells over the axial length,
+# so a/Delta = N/(8 DOMAIN)
+dom=${DOMAIN:-1}
+Ly=$(awk -v f="$dom" 'BEGIN { printf "%.10g", 2*f }')
+Rmax=$(awk -v f="$dom" 'BEGIN { printf "%.10g", f }')
+yc=$(awk -v f="$dom" 'BEGIN { printf "%.10g", f }')
 rho=1
 mu=1
 sigmaS=1
@@ -74,7 +79,7 @@ epsE=1
 sigmaE=${SIGMAE:-10}
 tag=${TAG:-}
 epsI=${EPSI:-1}
-forceForm=${FORCEFORM:-kortewegHelmholtz}
+forceForm=${FORCEFORM:-maxwellStress}
 wedgeDeg=5
 
 if [ ! -d "$base/0.orig" ]
@@ -310,6 +315,8 @@ ELEC
     cat > "$case"/taylor.info <<INFO
 mode $mode
 a $a
+aDelta $(awk -v n="$res" -v L="$Ly" -v a="$a" 'BEGIN { printf "%.6g", a*n/L }')
+domain $dom
 yc $yc
 Ca $Ca
 epsI $epsI
