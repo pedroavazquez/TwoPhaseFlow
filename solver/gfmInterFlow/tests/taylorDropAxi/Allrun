@@ -1,0 +1,533 @@
+#!/bin/sh
+#------------------------------------------------------------------------------
+# Taylor drop: leaky-dielectric drop in a uniform field (DC and AC), wedge.
+#
+# Domain (axis = y): 0 <= y <= 2, 0 <= r <= 1, N axial x N/2 radial cells,
+# Delta = 2/N, drop R = 0.25 centred on the axis at y = 1 (a/Delta = N/8).
+# Electrodes: bottom (y = 0) phiE = V, top (y = 2) phiE = 0, outer wall
+# insulating (zeroGradient), so E0 = V/2 along +y far from the drop.
+# Flow: rho1 = rho2 = 1, mu1 = mu2 = 1 (lambda = 1), sigma_s = 1, g = 0,
+# Oh = mu/sqrt(rho sigma_s a) = 2 (Stokes regime), slip walls.
+#
+# Cases (phase 1 = drop, eps_e = 1, sigma_e = 10, eps_i = 1):
+#   prolate : sigma_i = 30 (R = 3,   S = 1)  Taylor D/Ca = +0.2475
+#   oblate  : sigma_i = 1  (R = 0.1, S = 1)  Taylor D/Ca = -0.2985
+# Charge relaxation t_e = eps/sigma ~ 0.1 << flow time a mu/sigma_s = 0.25,
+# so charge convection (neglected by the theory) is weak.
+#
+# Modes:
+#   DC : transient charge, phiE(bottom) = V = E0 Ly, E0 = sqrt(Ca sigma_s/(eps_e a))
+#   AC : time-averaged, phiERe(bottom) = sqrt(2) E_rms Ly, phiEIm = 0,
+#        E_rms = sqrt(Ca sigma_s/(eps_e a)) (Torza, Cox & Mason use E_rms)
+#
+# Metric (coded FO 'dropShape', every step): P2 moment Q, axial half-length
+# halfL (axis column) and equatorial radius Req; taylorDeformation.py gives
+# D(t) = (L - B)/(L + B) and compares the steady value with the theory.
+#
+# Usage:
+#   ./Allrun [case ...]            cases: prolateDC oblateDC prolateAC oblateAC
+#                                  (default: prolateDC oblateDC)
+# Environment (defaults in brackets):
+#   RES       axial cells (even), list allowed       ["128"]   (a/Delta = 16)
+#   CA        electric capillary number              [0.1]
+#   OMEGA     AC angular frequency                   [10]      (omega t_e = 1)
+#   ENDTIME   end time [s]                           [4]
+#   DT        fixed time step; empty = 0.5 x capillary limit, rounded   []
+#   NWRITE    field writes per run                   [8]
+#   NPROCS    MPI ranks (1 = serial)                 [1]
+#   GFM       ghostFluid switch                      [off]
+#   SIGMAE    outer conductivity; sigma_i = R sigma_e keeps R = 3 / 0.1.
+#             Larger SIGMAE = shorter t_e = eps/sigma, weaker charge
+#             convection (electric Reynolds number ~ 1/SIGMAE)   [10]
+#   TAG       suffix for the case name (e.g. _Ca005)  []
+#   FORCEFORM kortewegHelmholtz | maxwellStress       [kortewegHelmholtz]
+#   EPSI      drop permittivity eps_i (S = eps_i/eps_e, eps_e = 1)   [1]
+#   TIMEOUT   wall-clock limit per run [s]           [86400]
+#------------------------------------------------------------------------------
+cd "${0%/*}" || exit 1
+. "${WM_PROJECT_DIR:?}"/bin/tools/RunFunctions
+
+base=../../../../run/velocityStaticCircle
+
+res_list=${RES:-"128"}
+Ca=${CA:-0.1}
+omega=${OMEGA:-10}
+endTime=${ENDTIME:-4}
+dtUser=${DT:-}
+nWrite=${NWRITE:-8}
+nProcs=${NPROCS:-1}
+gfm=${GFM:-off}
+tmax=${TIMEOUT:-86400}
+here=$(pwd)
+
+cases=${*:-"prolateDC oblateDC"}
+
+# fixed geometry and flow
+a=0.25
+yc=1
+Ly=2
+Rmax=1
+rho=1
+mu=1
+sigmaS=1
+epsE=1
+sigmaE=${SIGMAE:-10}
+tag=${TAG:-}
+epsI=${EPSI:-1}
+forceForm=${FORCEFORM:-kortewegHelmholtz}
+wedgeDeg=5
+
+if [ ! -d "$base/0.orig" ]
+then
+    echo "Error: base case (with 0.orig) not found: $base" 1>&2
+    exit 1
+fi
+
+writeInterval=$(awk -v t="$endTime" -v n="$nWrite" 'BEGIN { printf "%.10g", t/n }')
+thetaRad=$(awk -v d="$wedgeDeg" 'BEGIN { printf "%.12g", d*atan2(0,-1)/180 }')
+qLin=$(awk -v th="$thetaRad" -v R="$a" \
+    'BEGIN { pi = atan2(0,-1); printf "%.12g", th/(2*pi)*4*pi/5*R^5 }')
+Erms=$(awk -v c="$Ca" -v s="$sigmaS" -v e="$epsE" -v a="$a" \
+    'BEGIN { printf "%.12g", sqrt(c*s/(e*a)) }')
+xOut=$(awk -v r="$Rmax" -v d="$wedgeDeg" \
+    'BEGIN { printf "%.10f", r*cos(d/2*atan2(0,-1)/180) }')
+zOut=$(awk -v r="$Rmax" -v d="$wedgeDeg" \
+    'BEGIN { printf "%.10f", r*sin(d/2*atan2(0,-1)/180) }')
+
+echo "Taylor drop: cases [$cases], RES [$res_list], Ca $Ca, omega $omega," \
+     "sigma_e $sigmaE, eps_i $epsI, force $forceForm, endTime $endTime," \
+     "GFM $gfm, NPROCS $nProcs"
+
+for res in $res_list
+do
+if [ -n "$dtUser" ]
+then
+    deltaT=$dtUser
+else
+    deltaT=$(awk -v n="$res" -v L="$Ly" -v r="$rho" -v s="$sigmaS" '
+        BEGIN {
+            pi = atan2(0,-1); d = L/n
+            dt = 0.5*sqrt(2*r*d^3/(4*pi*s))
+            e = 10^int(log(dt)/log(10) - 1)
+            m = int(dt/e)
+            while (m >= 10) { m = int(m/10); e *= 10 }
+            printf "%.3g", m*e
+        }')
+fi
+
+for cname in $cases
+do
+    case $cname in
+        prolate*) sigmaI=$(awk -v s="$sigmaE" 'BEGIN { printf "%.12g", 3*s }') ;;
+        oblate*)  sigmaI=$(awk -v s="$sigmaE" 'BEGIN { printf "%.12g", 0.1*s }') ;;
+        *) echo "Unknown case $cname" 1>&2; continue ;;
+    esac
+    case $cname in
+        *DC) mode=DC ;;
+        *AC) mode=AC ;;
+        *) echo "Case name must end in DC or AC: $cname" 1>&2; continue ;;
+    esac
+
+    case=case_${cname}_N${res}${tag}
+    echo "=== $case  (deltaT $deltaT)"
+    rm -rf "$case"
+    mkdir "$case"
+
+    cp -r "$base"/0.orig "$base"/constant "$base"/system "$case"/
+    rm -rf "$case"/constant/polyMesh
+
+    nR=$((res / 2))
+    cat > "$case"/system/blockMeshDict <<BLOCKMESH
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      blockMeshDict;
+}
+
+scale 1;
+
+// axis = y, radial = x, wedge half-angle 2.5 deg, 0 <= y <= $Ly, r <= $Rmax
+vertices
+(
+    (0       0    0)
+    ($xOut   0    $zOut)
+    ($xOut   0   -$zOut)
+    (0       $Ly  0)
+    ($xOut   $Ly  $zOut)
+    ($xOut   $Ly -$zOut)
+);
+
+blocks
+(
+    hex (0 3 4 1 0 3 5 2) ($res $nR 1) simpleGrading (1 1 1)
+);
+
+boundary
+(
+    axis
+    {
+        type empty;
+        faces ((0 3 3 0));
+    }
+    bottom
+    {
+        type patch;
+        faces ((0 1 2 0));
+    }
+    top
+    {
+        type patch;
+        faces ((3 4 5 3));
+    }
+    outer
+    {
+        type patch;
+        faces ((1 2 5 4));
+    }
+    front
+    {
+        type wedge;
+        faces ((0 1 4 3));
+    }
+    back
+    {
+        type wedge;
+        faces ((0 3 5 2));
+    }
+);
+BLOCKMESH
+
+    rm -rf "$case"/0.orig
+    mkdir "$case"/0.orig
+    writeField()
+    {
+        # $1 name, $2 class, $3 dimensions, $4 internal value,
+        # $5 bottom BC, $6 top BC, $7 outer BC
+        cat > "$case"/0.orig/"$1" <<FIELD
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       $2;
+    object      $1;
+}
+
+dimensions      $3;
+
+internalField   uniform $4;
+
+boundaryField
+{
+    bottom
+    {
+        $5
+    }
+    top
+    {
+        $6
+    }
+    outer
+    {
+        $7
+    }
+    axis
+    {
+        type            empty;
+    }
+    "(front|back)"
+    {
+        type            wedge;
+    }
+}
+FIELD
+    }
+    writeField U            volVectorField "[0 1 -1 0 0 0 0]" "(0 0 0)" \
+        "type slip;" "type slip;" "type slip;"
+    writeField alpha.phase1 volScalarField "[0 0 0 0 0 0 0]" 0 \
+        "type zeroGradient;" "type zeroGradient;" "type zeroGradient;"
+    writeField p            volScalarField "[1 -1 -2 0 0 0 0]" 0 \
+        "type calculated; value uniform 0;" "type calculated; value uniform 0;" \
+        "type calculated; value uniform 0;"
+    writeField p_rgh        volScalarField "[1 -1 -2 0 0 0 0]" 0 \
+        "type fixedFluxPressure; value uniform 0;" \
+        "type fixedFluxPressure; value uniform 0;" \
+        "type fixedFluxPressure; value uniform 0;"
+
+    dimPhi="[1 2 -3 0 0 -1 0]"
+    if [ "$mode" = DC ]
+    then
+        V=$(awk -v E="$Erms" -v L="$Ly" 'BEGIN { printf "%.12g", E*L }')
+        writeField phiE volScalarField "$dimPhi" 0 \
+            "type fixedValue; value uniform $V;" \
+            "type fixedValue; value uniform 0;" \
+            "type zeroGradient;"
+    else
+        V=$(awk -v E="$Erms" -v L="$Ly" 'BEGIN { printf "%.12g", sqrt(2)*E*L }')
+        writeField phiERe volScalarField "$dimPhi" 0 \
+            "type fixedValue; value uniform $V;" \
+            "type fixedValue; value uniform 0;" \
+            "type zeroGradient;"
+        writeField phiEIm volScalarField "$dimPhi" 0 \
+            "type fixedValue; value uniform 0;" \
+            "type fixedValue; value uniform 0;" \
+            "type zeroGradient;"
+    fi
+
+    # Electric properties (phase 1 = drop)
+    cat > "$case"/constant/electricProperties <<ELEC
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      electricProperties;
+}
+
+ehdModel        $mode;
+
+epsilon1        [-1 -3 4 0 0 2 0] $epsI;
+epsilon2        [-1 -3 4 0 0 2 0] $epsE;
+sigma1          [-1 -3 3 0 0 2 0] $sigmaI;
+sigma2          [-1 -3 3 0 0 2 0] $sigmaE;
+
+epsilonMixing   harmonic;
+sigmaMixing     harmonic;
+
+forceForm       $forceForm;
+
+AC
+{
+    omega            [0 0 -1 0 0 0 0] $omega;
+    nOuterCorrectors 50;
+    tolerance        1e-8;
+    relaxation       1;
+}
+ELEC
+
+    # Info for taylorDeformation.py
+    cat > "$case"/taylor.info <<INFO
+mode $mode
+a $a
+yc $yc
+Ca $Ca
+epsI $epsI
+epsE $epsE
+sigmaI $sigmaI
+sigmaE $sigmaE
+lambda 1
+omega $omega
+sigmaS $sigmaS
+INFO
+
+    # Flow properties
+    tp_=$case/constant/transportProperties
+    nu=$(awk -v m="$mu" -v r="$rho" 'BEGIN { printf "%.12g", m/r }')
+    foamDictionary "$tp_" -entry phase1/nu  -set "[0 2 -1 0 0 0 0] $nu"  > /dev/null
+    foamDictionary "$tp_" -entry phase1/rho -set "[1 -3 0 0 0 0 0] $rho" > /dev/null
+    foamDictionary "$tp_" -entry phase2/nu  -set "[0 2 -1 0 0 0 0] $nu"  > /dev/null
+    foamDictionary "$tp_" -entry phase2/rho -set "[1 -3 0 0 0 0 0] $rho" > /dev/null
+    foamDictionary "$tp_" -entry sigma -set "[1 0 -2 0 0 0 0] $sigmaS"   > /dev/null
+    foamDictionary "$tp_" -entry surfaceForces/sigma -set "$sigmaS"      > /dev/null
+    foamDictionary "$tp_" -entry surfaceForces/surfaceTensionForceModel \
+        -set heightFunction > /dev/null
+
+    # Solvers and schemes for the electric fields
+    fs_=$case/system/fvSolution
+    foamDictionary "$fs_" -entry PIMPLE/ghostFluid -add "$gfm" > /dev/null
+    foamDictionary "$fs_" -entry "solvers/phiE" -set \
+        "{ solver PCG; preconditioner DIC; tolerance 1e-10; relTol 0; }" > /dev/null
+    for f in phiERe phiEIm
+    do
+        foamDictionary "$fs_" -entry "solvers/$f" -set \
+            "{ solver PBiCGStab; preconditioner DILU; tolerance 1e-10; relTol 0; }" > /dev/null
+    done
+    foamDictionary "$case"/system/fvSchemes -entry "divSchemes/div(phi,rhoE)" \
+        -set "Gauss vanLeer" > /dev/null
+
+    cd_=$case/system/controlDict
+    foamDictionary "$cd_" -entry application    -set gfmInterFlow > /dev/null
+    foamDictionary "$cd_" -entry endTime        -set "$endTime"   > /dev/null
+    foamDictionary "$cd_" -entry deltaT         -set "$deltaT"    > /dev/null
+    foamDictionary "$cd_" -entry adjustTimeStep -set no           > /dev/null
+    foamDictionary "$cd_" -entry writeControl   -set runTime      > /dev/null
+    foamDictionary "$cd_" -entry writeInterval  -set "$writeInterval" > /dev/null
+    foamDictionary "$cd_" -entry writeFormat    -set binary       > /dev/null
+    foamDictionary "$cd_" -entry functions      -remove > /dev/null 2>&1
+
+    cat >> "$cd_" <<'FUNCS'
+
+functions
+{
+    #include "dropFunctions"
+}
+FUNCS
+
+    cat > "$case"/system/dropFunctions <<DROPFUNCS
+minMax
+{
+    type            fieldMinMax;
+    libs            (fieldFunctionObjects);
+    fields          (U p);
+    location        no;
+    mode            magnitude;
+    writeControl    timeStep;
+    writeInterval   1;
+}
+
+dropShape
+{
+    type            coded;
+    libs            (utilityFunctionObjects);
+    name            dropShape;
+
+    codeInclude
+    #{
+        #include "volFields.H"
+        #include "OFstream.H"
+        #include "OSspecific.H"
+    #};
+
+    codeOptions
+    #{
+        -I\$(LIB_SRC)/finiteVolume/lnInclude \\
+        -I\$(LIB_SRC)/meshTools/lnInclude
+    #};
+
+    codeLibs
+    #{
+        -lfiniteVolume \\
+        -lmeshTools
+    #};
+
+    codeData
+    #{
+        autoPtr<OFstream> osPtr_;
+    #};
+
+    codeExecute
+    #{
+        const fvMesh& mesh = refCast<const fvMesh>(obr_);
+        const volScalarField& alpha =
+            mesh.lookupObject<volScalarField>("alpha.phase1");
+        const scalarField& V = mesh.cellVolumes();
+        const vectorField& C = mesh.cellCentres();
+
+        const scalar yc = $yc;
+        const scalar dy = scalar($Ly)/$res;   // floating division
+        const scalar theta = $thetaRad;
+        const scalar qLin = $qLin;
+
+        scalar vol = 0, Q = 0, sumAxis = 0, volEq = 0;
+        forAll(C, celli)
+        {
+            const scalar a = alpha[celli];
+            const scalar aV = a*V[celli];
+            const scalar dyc = C[celli].y() - yc;
+            const scalar s2 = sqr(C[celli].x()) + sqr(C[celli].z());
+
+            vol += aV;
+            Q += aV*(sqr(dyc) - 0.5*s2);
+
+            if (C[celli].x() < dy)
+            {
+                sumAxis += a;
+            }
+            if (mag(dyc) < dy)
+            {
+                volEq += aV;
+            }
+        }
+        reduce(vol, sumOp<scalar>());
+        reduce(Q, sumOp<scalar>());
+        reduce(sumAxis, sumOp<scalar>());
+        reduce(volEq, sumOp<scalar>());
+
+        if (Pstream::master())
+        {
+            if (!osPtr_)
+            {
+                const fileName dir =
+                    mesh.time().globalPath()/"postProcessing"/"dropShape"
+                   /mesh.time().timeName();
+                mkDir(dir);
+                osPtr_.reset(new OFstream(dir/"dropShape.dat"));
+                osPtr_().precision(12);
+                osPtr_() << "# Time vol Q eps halfL Req" << nl;
+            }
+
+            const scalar Req = Foam::sqrt(volEq/(2*dy*0.5*theta));
+
+            osPtr_()
+                << mesh.time().value() << tab
+                << vol << tab
+                << Q << tab
+                << Q/qLin << tab
+                << 0.5*dy*sumAxis << tab
+                << Req << endl;
+        }
+    #};
+}
+DROPFUNCS
+
+    if [ "$nProcs" -gt 1 ]
+    then
+        cat > "$case"/system/decomposeParDict <<DECOMPDICT
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      decomposeParDict;
+}
+
+numberOfSubdomains $nProcs;
+
+method          simple;
+coeffs
+{
+    n               (1 $nProcs 1);
+}
+DECOMPDICT
+    fi
+
+    (
+        cd "$case" || exit 1
+        runApplication blockMesh
+        restore0Dir
+
+        foamDictionary system/controlDict -entry writeFormat -set ascii > /dev/null
+        runApplication -s C0 postProcess -func writeCellCentres -time 0
+        python3 "$here"/exactAlphaAxiMode.py 0 "$res" "$a" "$yc" "$wedgeDeg" \
+            2 0 64 "$Ly" "$Rmax" > log.exactAlphaAxiMode 2>&1 \
+            || { echo "    exactAlphaAxiMode failed:"; cat log.exactAlphaAxiMode; exit 1; }
+        rm -f 0/C 0/Cx 0/Cy 0/Cz
+        foamDictionary system/controlDict -entry writeFormat -set binary > /dev/null
+        touch case.foam
+
+        if [ "$nProcs" -gt 1 ]
+        then
+            runApplication decomposePar
+            echo "Running gfmInterFlow on $(pwd) ($nProcs ranks, timeout ${tmax}s)"
+            timeout -k 10 "$tmax" \
+                mpirun -np "$nProcs" gfmInterFlow -parallel \
+                > log.gfmInterFlow 2>&1
+        else
+            echo "Running gfmInterFlow on $(pwd) (timeout ${tmax}s)"
+            timeout -k 10 "$tmax" gfmInterFlow > log.gfmInterFlow 2>&1
+        fi
+        status=$?
+
+        if grep -q "^End" log.gfmInterFlow
+        then
+            echo "    finished ($(grep ExecutionTime log.gfmInterFlow | tail -1 | awk '{print $3}') s, status $status)"
+        else
+            echo "    FAILED (status $status), last lines of the log:" 1>&2
+            tail -n 20 log.gfmInterFlow 1>&2
+        fi
+    )
+done
+done
+
+python3 ./taylorDeformation.py

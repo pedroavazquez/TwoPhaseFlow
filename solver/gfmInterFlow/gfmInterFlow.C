@@ -13,6 +13,7 @@
 #include "CorrectPhi.H"
 #include "fvcSmooth.H"
 #include "surfaceForces.H"
+#include "ehdModel.H"
 
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
 
@@ -26,7 +27,9 @@ int main(int argc, char *argv[])
         " adaptive re-meshing.\n"
         "The solver is derived from interFoam (via TwoPhaseFlow's interFlow).\n"
         "Optional ghost-fluid (sharp) treatment of the surface tension and\n"
-        "hydrostatic pressure jumps: set 'ghostFluid on;' in the PIMPLE dict."
+        "hydrostatic pressure jumps: set 'ghostFluid on;' in the PIMPLE dict.\n"
+        "Optional leaky-dielectric electrohydrodynamics (DC or time-averaged"
+        " AC):\nsee constant/electricProperties and ehdModel.H."
     );
 
     Foam::argList::addBoolOption
@@ -130,6 +133,9 @@ int main(int argc, char *argv[])
             mixture.correct();
 
             surfForces.correct();
+
+            // Electric field, charge and force (constant/electricProperties)
+            ehd.correct();
 
             if (pimple.frozenFlow())
             {

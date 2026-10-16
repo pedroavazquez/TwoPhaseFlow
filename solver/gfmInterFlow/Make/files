@@ -1,3 +1,4 @@
+ehdModel.C
 gfmInterFlow.C
 
 EXE = $(FOAM_USER_APPBIN)/gfmInterFlow

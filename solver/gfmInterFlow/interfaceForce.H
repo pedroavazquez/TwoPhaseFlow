@@ -36,6 +36,8 @@ Description
     ESI OpenFOAM refuses phiHbyA += phig in pEqn.H.
 
     Non-coupled patches carry no force (no contact-line treatment).
+
+    The electric force of ehdModel (if active) is added at the end.
     The face delta coefficient is mesh.nonOrthDeltaCoeffs(), i.e. the one of
     the implicit part of laplacian(rAUf, p_rgh).
 
@@ -162,6 +164,13 @@ else
             );
         }
     }
+}
+
+// Electric force (leaky dielectric, DC or time-averaged AC), same
+// balanced face form; zero when constant/electricProperties is absent
+if (ehd.active())
+{
+    interfaceForce += ehd.force();
 }
 
 // ************************************************************************* //

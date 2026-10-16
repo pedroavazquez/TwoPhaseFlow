@@ -93,6 +93,9 @@ IOdictionary transportProperties
 
 surfaceForces surfForces(alpha1,phi,U,transportProperties);
 
+// Electrohydrodynamics (constant/electricProperties, optional)
+ehdModel ehd(alpha1, phi);
+
 
 //#include "readGravitationalAcceleration.H"
 //#include "readhRef.H"

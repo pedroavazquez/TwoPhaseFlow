@@ -108,3 +108,131 @@ What to expect:
 ## License
 
 GPL v3 or later, as OpenFOAM and TwoPhaseFlow.
+
+## Electrohydrodynamics (leaky dielectric, DC and AC)
+
+`ehdModel` (files `ehdModel.H/.C`) adds the Taylor-Melcher leaky-dielectric
+model. Its face-normal force is added to `interfaceForce`, so it enters
+`UEqn.H` and `pEqn.H` in the same balanced form as the surface tension.
+Without `constant/electricProperties` the solver behaves exactly as before.
+
+### `constant/electricProperties`
+
+```
+ehdModel        DC;          // none | DC | AC
+
+epsilon1        [-1 -3 4 0 0 2 0] 2.0;    // permittivity of phase 1 (alpha1 = 1)
+epsilon2        [-1 -3 4 0 0 2 0] 1.0;
+sigma1          [-1 -3 3 0 0 2 0] 1.0;    // conductivity
+sigma2          [-1 -3 3 0 0 2 0] 0.1;
+
+epsilonMixing   harmonic;    // arithmetic | harmonic (cells and faces)
+sigmaMixing     harmonic;
+
+forceForm       maxwellStress;       // default; or kortewegHelmholtz (only for eps1 = eps2)
+correctEveryOuterCorrector no;       // default: solve once per time step
+
+nNonOrthogonalCorrectors 0;  // DC only
+
+AC
+{
+    omega            [0 0 -1 0 0 0 0] 1000;   // angular frequency
+    nOuterCorrectors 50;
+    tolerance        1e-8;
+    relaxation       1;
+}
+```
+
+### DC: transient charge (charge-conservative, implicit relaxation)
+
+```
+-div(eps grad phiE) = rhoE,     d(rhoE)/dt + div(rhoE u) = div(sigma grad phiE)
+rhoE*  = rhoE^n - dt div(phi, rhoE^n)
+-div((eps + dt sigma) grad phiE^{n+1}) = rhoE*
+rhoE^{n+1} = -div(eps grad phiE^{n+1})
+F_f = rhoE_f E_n - 1/2 |E|^2_f snGrad(eps)
+```
+
+Stable for any `dt` relative to the relaxation time `eps/sigma`, and the
+total charge is conserved to solver tolerance. Fields: `0/phiE` (required,
+electrode BCs; time-dependent fixedValue BCs give low-frequency AC in the
+time domain) and `0/rhoE` (optional, default 0).
+
+### AC: time-averaged force from the complex potential
+
+```
+div((sigma + i omega eps) grad phiHat) = 0,   phiHat = phiERe + i phiEIm
+<F>_f = 1/2 (rhoRe_f ERe_n + rhoIm_f EIm_n) - 1/4 (|ERe|^2 + |EIm|^2)_f snGrad(eps)
+```
+
+Valid when the field period is short compared with the flow time scales
+(the 2 omega part of the force is dropped). The real and imaginary parts are
+solved by outer iterations after rotating each matrix row by the phase of
+its complex diagonal (see `ehdModel.H`). This keeps the coupling small even
+for `sigma2 = 0` and either mixing law; in 1D tests it converges in 2-14
+iterations for conductivity ratios up to 1e6. Fields: `0/phiERe`, `0/phiEIm`
+(required; e.g. electrode `phiERe = V0`, `phiEIm = 0`, ground 0).
+
+### `system/fvSolution` and `system/fvSchemes`
+
+The electric equations always use the plain entries below (never
+`phiEFinal` etc.), since they are solved once per outer corrector.
+
+```
+solvers
+{
+    phiE                          // DC: symmetric matrix
+    {
+        solver          PCG;
+        preconditioner  DIC;
+        tolerance       1e-10;
+        relTol          0;
+    }
+    "phiE(Re|Im)"                 // AC: row-rotated, asymmetric matrix
+    {
+        solver          PBiCGStab;
+        preconditioner  DILU;
+        tolerance       1e-10;
+        relTol          0;
+    }
+}
+```
+
+```
+divSchemes
+{
+    div(phi,rhoE)   Gauss vanLeer;     // DC charge advection
+}
+```
+
+Output: `phiE`, `rhoE`, `E` (DC) or `phiERe`, `phiEIm`, `rhoERe`,
+`rhoEIm`, `ERe`, `EIm` (AC), and `electricForce` (cell-reconstructed force
+density) in both modes.
+
+### Force form: `maxwellStress`
+
+The (time-averaged) Maxwell stress is built at cells from
+`E = reconstruct(-snGrad(phi)|Sf|)`:
+
+```
+DC:  T = eps (E E - 1/2 |E|^2 I)
+AC:  T = 1/2 eps (ERe ERe + EIm EIm) - 1/4 eps (|ERe|^2 + |EIm|^2) I
+F_f = deltaCoeff_f [(n.T.n)_N - (n.T.n)_P]                (compact normal-stress jump)
+    + interp_f[ n.div(T) - n_i n_j n_k d_i T_jk ]         (tangential shear, hoop terms)
+```
+
+The compact part is discretised like `snGrad(p_rgh)` (same delta
+coefficient), so the jump of the electric normal stress is balanced exactly
+by the pressure, as in Basilisk's `ehd/stress.h`. No free-charge density is
+used for the force. In parallel it adds about ten halo exchanges per step and
+no global reductions.
+
+### Once per time step
+
+The electric problem (potential, charge, force) is solved on the first call
+of each time step; later PIMPLE outer correctors reuse the force
+(`correctEveryOuterCorrector yes` restores a solve per corrector). Fields
+used only for output (`E`/`ERe`/`EIm`, `rhoERe`/`rhoEIm` with the
+Maxwell-stress force, `electricForce`) are computed only at write times. On
+2D and wedge meshes the gradients of the out-of-plane stress components are
+skipped (they multiply n_k = 0).
