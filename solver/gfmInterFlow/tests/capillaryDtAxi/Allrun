@@ -93,6 +93,7 @@ esac
 xtag=""
 [ -n "$mu1User" ] && xtag="${xtag}_mu1-$mu1User"
 [ "$nOuter" != 1 ] && xtag="${xtag}_nOuter$nOuter"
+[ "$gfm" = on ] && xtag="${xtag}_gfm"
 wedgeDeg=5
 
 # geometry in the unit box of the generator, then scaled to SI

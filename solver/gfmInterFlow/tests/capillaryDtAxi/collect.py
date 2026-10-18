@@ -16,6 +16,9 @@ SI and scaled runs are directly comparable:
   dev       max |eps(t) - eps_ref(t)| / eps0 over the common time range
   Ulate     max|U| over the last 20 % of the run relative to its peak;
             the physical flow decays like eps, so values ~1 flag growth
+  gU        growth rate of max|U| over the second half of the run, in
+            units of 1/tau_th (least squares on ln max|U|): about -1 for
+            the physical relaxation, > 0 for an instability
 
 Debris (alpha outside 1.5 R from the drop centre, newer cases only):
   first time with any cell alpha > 1e-12 outside, max vDebris/vDrop,
@@ -135,7 +138,7 @@ cases = sorted(glob.glob("case_cMu-*"), key=key)
 data = {c: load(c) for c in cases}
 
 print(f"{'case':32s} {'dt/tauMu':>9s} {'dt/tauRho':>9s} {'steps':>7s} {'tEnd':>6s} "
-      f"{'tau/th':>7s} {'tau/ref':>7s} {'dev':>8s} {'Ulate':>8s}  status")
+      f"{'tau/th':>7s} {'tau/ref':>7s} {'dev':>8s} {'Ulate':>8s} {'gU':>8s}  status")
 
 for c in cases:
     d = data.get(c)
@@ -161,12 +164,25 @@ for c in cases:
         upk = max(d["um"])
         t0 = 0.8*d["tm"][-1]
         ulate = max(u for ti, u in zip(d["tm"], d["um"]) if ti >= t0)/upk
+    gU = float("nan")
+    if len(d["um"]) > 10:
+        tm, um = d["tm"], d["um"]
+        h = [(ti, math.log(u)) for ti, u in zip(tm, um)
+             if ti >= 0.5*tm[-1] and u > 0 and math.isfinite(u)]
+        if len(h) > 5:
+            n = len(h)
+            mt = sum(p[0] for p in h)/n
+            ml = sum(p[1] for p in h)/n
+            sxx = sum((p[0] - mt)**2 for p in h)
+            if sxx > 0:
+                gU = sum((p[0] - mt)*(p[1] - ml) for p in h)/sxx*th
     bad = (not d["ended"]) or any(not math.isfinite(e) for e in eps) \
-        or ulate > 0.5 or (math.isfinite(dev) and dev > 0.05)
+        or (gU > 0 if math.isfinite(gU) else ulate > 0.5) \
+        or (math.isfinite(dev) and dev > 0.05)
     status = "ok" if not bad else ("FAILED" if not d["ended"] else "UNSTABLE")
     print(f"{c:32s} {dt_med/d['tauMu']:9.3e} {dt_med/d['tauRho']:9.3e} {len(t):7d} "
           f"{t[-1]/th:6.2f} {tau/th:7.4f} {tau/tau_ref:7.4f} {dev:8.2e} "
-          f"{ulate:8.2e}  {status}")
+          f"{ulate:8.2e} {gU:8.2f}  {status}")
 
 print()
 print(f"{'case':32s} {'tFirst':>7s} {'vDeb/vDrop':>11s} {'nDeb':>6s} "

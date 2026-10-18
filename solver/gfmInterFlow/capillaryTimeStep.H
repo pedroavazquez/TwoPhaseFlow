@@ -33,12 +33,14 @@ Description
         {
             cRho    1;      // inertial (Brackbill) branch
             cMu     0.5;    // viscous-capillary branch
+            muMode  min;    // min (default) | sum
         }
 
     For every interface cell (1e-3 < alpha1 < 1 - 1e-3)
 
         tauRho = sqrt((rho1 + rho2) Delta^3 / (2 pi sigma))
-        tauMu  = (mu1 + mu2) Delta / sigma
+        tauMu  = muCap Delta / sigma,   muCap = min(mu1, mu2) (muMode min)
+                                         or mu1 + mu2   (muMode sum)
         a = cMu tauMu,  b = cRho tauRho
         dtCap = (a + sqrt(a^2 + 4 b^2))/2
 
@@ -63,6 +65,18 @@ Description
 
     const scalar cRho = capDict.getOrDefault<scalar>("cRho", 1.0);
     const scalar cMu = capDict.getOrDefault<scalar>("cMu", 0.5);
+
+    // min: the less viscous phase controls the grid-scale capillary modes
+    // (tests/capillaryDtAxi: mu1/mu2 = 0.01 is unstable at dt = 0.2 tauRho,
+    // mu1 = mu2 is stable at 0.8 tauRho); sum: Galusinski-Vigneaux as is
+    const word muMode = capDict.getOrDefault<word>("muMode", "min");
+    if (muMode != "min" && muMode != "sum")
+    {
+        FatalIOErrorInFunction(capDict)
+            << "muMode must be min or sum, not " << muMode
+            << exit(FatalIOError);
+    }
+    const bool muMin = (muMode == "min");
 
     // Cell size: smallest centre-to-centre distance over internal and
     // coupled (processor, cyclic) faces. Wedge/empty/walls are ignored.
@@ -124,7 +138,11 @@ Description
             const scalar s = max(sigmaCap[celli], SMALL);
 
             const scalar b = cRho*Foam::sqrt(rhoSum*pow3(d)/(twoPi*s));
-            const scalar a = cMu*(mu1[celli] + mu2[celli])*d/s;
+            const scalar muCap =
+                muMin
+              ? min(mu1[celli], mu2[celli])
+              : mu1[celli] + mu2[celli];
+            const scalar a = cMu*muCap*d/s;
 
             dtCap = min(dtCap, 0.5*(a + Foam::sqrt(sqr(a) + 4*sqr(b))));
             dtRho = min(dtRho, b);
