@@ -35,7 +35,9 @@
 #   VISC      PIMPLE/viscousStress list: explicitTranspose |
 #             stabilisedTranspose | noTranspose      [explicitTranspose]
 #   CSTAB     PIMPLE/cStab for stabilisedTranspose   [1]
-#   DT        fixed time step (adjustTimeStep no); empty = adaptive  []
+#   DT        list of fixed time steps (adjustTimeStep no) [adaptive]
+#   MU1       override mu1 (e.g. = mu2 for a test without viscosity jump) []
+#   NOUTER    PIMPLE nOuterCorrectors                [1]
 #   UNITS     SI | scaled                            [SI]
 #             scaled: same physics in units L0 = R, T0 = mu2 R/sigma,
 #             M0 = sigma T0^2 (R = sigma = mu2 = 1, mu1 = 0.01,
@@ -55,8 +57,9 @@ res=${RES:-128}
 units=${UNITS:-SI}
 visc_list=${VISC:-explicitTranspose}
 cStab=${CSTAB:-1}
-dtFixed=${DT:-}
-if [ -n "$dtFixed" ]; then adjust=no; else adjust=yes; fi
+dt_list=${DT:-adaptive}
+nOuter=${NOUTER:-1}
+mu1User=${MU1:-}
 eps=${EPS:-0.05}
 gfm=${GFM:-off}
 nProcs=${NPROCS:-1}
@@ -86,6 +89,10 @@ scaled)
     echo "Error: UNITS must be SI or scaled" 1>&2; exit 1
     ;;
 esac
+[ -n "$mu1User" ] && mu1=$mu1User
+xtag=""
+[ -n "$mu1User" ] && xtag="${xtag}_mu1-$mu1User"
+[ "$nOuter" != 1 ] && xtag="${xtag}_nOuter$nOuter"
 wedgeDeg=5
 
 # geometry in the unit box of the generator, then scaled to SI
@@ -120,6 +127,9 @@ FoamFile
 HDR
 }
 
+for dtv in $dt_list
+do
+if [ "$dtv" = adaptive ]; then dtFixed=""; adjust=yes; else dtFixed=$dtv; adjust=no; fi
 for visc in $visc_list
 do
 for cmu in $cmu_list
@@ -131,7 +141,7 @@ do
         *) echo "Error: unknown VISC $visc" 1>&2; exit 1 ;;
     esac
     dtag=${dtFixed:+_dt$dtFixed}
-    case=case_cMu-${cmu}${vtag}${dtag}${suffix}
+    case=case_cMu-${cmu}${vtag}${dtag}${xtag}${suffix}
     echo "=== $case"
     rm -rf "$case"
     mkdir -p "$case"/system "$case"/constant "$case"/0.orig
@@ -439,7 +449,7 @@ solvers
 PIMPLE
 {
     momentumPredictor yes;
-    nOuterCorrectors 1;
+    nOuterCorrectors $nOuter;
     nCorrectors     3;
     nNonOrthogonalCorrectors 0;
     correctPhi      no;
@@ -494,6 +504,7 @@ EOF
             tail -n 15 log.gfmInterFlow 1>&2
         fi
     )
+done
 done
 done
 
