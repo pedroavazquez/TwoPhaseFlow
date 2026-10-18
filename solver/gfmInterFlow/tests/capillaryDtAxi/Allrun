@@ -226,6 +226,27 @@ $capDict
 
 functions
 {
+    // Courant number field (same definition as the solver: 0.5 sum|phi|/V dt)
+    // and the location of its maximum, every time step
+    Co
+    {
+        type            CourantNo;
+        libs            (fieldFunctionObjects);
+        executeControl  timeStep;
+        writeControl    writeTime;
+    }
+
+    minMaxCo
+    {
+        type            fieldMinMax;
+        libs            (fieldFunctionObjects);
+        fields          (Co);
+        mode            magnitude;
+        location        yes;
+        writeControl    timeStep;
+        writeInterval   1;
+    }
+
     minMax
     {
         type            fieldMinMax;
