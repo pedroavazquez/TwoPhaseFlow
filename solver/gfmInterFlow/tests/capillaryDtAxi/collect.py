@@ -37,12 +37,12 @@ def read_info(case):
     fn = os.path.join(case, "caseInfo")
     if not os.path.exists(fn):
         # cases made before caseInfo existed: SI defaults, RES = 128
-        cmu = case.split("cMu-")[1]
+        cmu = split_name(case)[0]
         return dict(R=30e-6, mu1=1e-3, mu2=0.1, sigma=5e-3, rho1=1000.0,
                     res=128.0, cMu=cmu)
     tok = open(fn).read().split()
     d = dict(zip(tok[0::2], tok[1::2]))
-    out = {k: float(v) for k, v in d.items() if k != "cMu"}
+    out = {k: float(v) for k, v in d.items() if k not in ("cMu", "visc")}
     out["cMu"] = d.get("cMu", "?")
     return out
 
@@ -111,19 +111,30 @@ def load(case):
     return p
 
 
+def split_name(c):
+    """case_cMu-<value><group>, group = [_stab..|_noT][_dt..][_scaled]"""
+    rest = c.split("cMu-", 1)[1]
+    v, _, g = rest.partition("_")
+    return v, ("_" + g if g else "")
+
+
 def suffix(c):
-    return "_scaled" if c.endswith("_scaled") else ""
+    return split_name(c)[1]
 
 
 def key(c):
-    v = c.split("cMu-")[1].replace("_scaled", "")
-    return (suffix(c), -1.0 if v == "legacy" else float(v))
+    v, g = split_name(c)
+    try:
+        x = float(v)
+    except ValueError:
+        x = -1.0
+    return (g, x)
 
 
 cases = sorted(glob.glob("case_cMu-*"), key=key)
 data = {c: load(c) for c in cases}
 
-print(f"{'case':22s} {'dt/tauMu':>9s} {'dt/tauRho':>9s} {'steps':>7s} {'tEnd':>6s} "
+print(f"{'case':32s} {'dt/tauMu':>9s} {'dt/tauRho':>9s} {'steps':>7s} {'tEnd':>6s} "
       f"{'tau/th':>7s} {'tau/ref':>7s} {'dev':>8s} {'Ulate':>8s}  status")
 
 for c in cases:
@@ -131,7 +142,7 @@ for c in cases:
     if d is None:
         continue
     if not d["t"]:
-        print(f"{c:22s}  no dropShape output")
+        print(f"{c:32s}  no dropShape output")
         continue
     th = d["tau_th"]
     ref = data.get("case_cMu-0" + suffix(c))
@@ -153,12 +164,12 @@ for c in cases:
     bad = (not d["ended"]) or any(not math.isfinite(e) for e in eps) \
         or ulate > 0.5 or (math.isfinite(dev) and dev > 0.05)
     status = "ok" if not bad else ("FAILED" if not d["ended"] else "UNSTABLE")
-    print(f"{c:22s} {dt_med/d['tauMu']:9.3e} {dt_med/d['tauRho']:9.3e} {len(t):7d} "
+    print(f"{c:32s} {dt_med/d['tauMu']:9.3e} {dt_med/d['tauRho']:9.3e} {len(t):7d} "
           f"{t[-1]/th:6.2f} {tau/th:7.4f} {tau/tau_ref:7.4f} {dev:8.2e} "
           f"{ulate:8.2e}  {status}")
 
 print()
-print(f"{'case':22s} {'tFirst':>7s} {'vDeb/vDrop':>11s} {'nDeb':>6s} "
+print(f"{'case':32s} {'tFirst':>7s} {'vDeb/vDrop':>11s} {'nDeb':>6s} "
       f"{'alphaMaxOut':>12s} {'at r/R':>7s} {'y/R':>7s}   (debris outside 1.5 R)")
 for c in cases:
     d = data.get(c)
@@ -168,7 +179,7 @@ for c in cases:
     tdeb = [ti for ti, r in zip(d["t"], d["deb"]) if r[1] > 0]
     imax = max(range(len(d["deb"])), key=lambda i: d["deb"][i][2])
     rm = d["deb"][imax]
-    print(f"{c:22s} {(tdeb[0]/th if tdeb else float('nan')):7.3f} "
+    print(f"{c:32s} {(tdeb[0]/th if tdeb else float('nan')):7.3f} "
           f"{max(r[0] for r in d['deb']):11.3e} {int(max(r[1] for r in d['deb'])):6d} "
           f"{rm[2]:12.3e} {rm[3]/R:7.3f} {rm[4]/R:7.3f}")
 

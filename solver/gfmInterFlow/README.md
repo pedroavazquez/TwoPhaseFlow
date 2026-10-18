@@ -278,3 +278,28 @@ Brackbill limit with the unbiased Delta.
 `tests/capillaryDtAxi` runs a relaxing mode-2 drop with the physics of the
 co-flow case for several `cMu` and compares the relaxation time, `eps(t)` and
 `max|U|(t)` with the `cMu = 0` run and the Stokes theory.
+
+## Viscous stress at large viscous Fourier numbers
+
+`turbulence->divDevRhoReff(rho, U)` treats `laplacian(mu, U)` implicitly and
+the transpose part `div(mu dev2(grad(U)^T))` explicitly. For constant mu the
+latter vanishes (div U = 0), but at a viscosity jump it is
+`~ grad(mu).grad(U)^T`, of the same order as the implicit term, and the
+explicit treatment needs a viscous Fourier number `mu dt/(rho Delta^2) = O(1)`.
+In viscous capillary flows (Oh >~ 1) the capillary and Courant limits allow
+far larger steps, and the run then blows up within ~50 steps
+(tests/capillaryDtAxi: `mu2 dt/(rho Delta^2) = 15` with `mu1/mu2 = 0.01`).
+
+```
+PIMPLE
+{
+    viscousStress   explicitTranspose;    // default, as interFlow
+//  viscousStress   stabilisedTranspose;  // + implicit-explicit stabiliser
+//  cStab           1;                    //   -lap(cStab mu, U)^{n+1} + lap(cStab mu, U)^n
+//  viscousStress   noTranspose;          // diagnostic only (wrong stress jump)
+}
+```
+
+The stabiliser cancels at steady state and adds an O(dt) error
+`~ cStab mu dt lap(dU/dt)`, which tests/capillaryDtAxi measures against the
+small-step reference.

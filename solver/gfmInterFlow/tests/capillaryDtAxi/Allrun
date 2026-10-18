@@ -32,6 +32,10 @@
 #   GFM       ghostFluid switch                      [off]
 #   NPROCS    MPI ranks per run                      [1]
 #   TIMEOUT   wall-clock limit per run [s]           [7200]
+#   VISC      PIMPLE/viscousStress list: explicitTranspose |
+#             stabilisedTranspose | noTranspose      [explicitTranspose]
+#   CSTAB     PIMPLE/cStab for stabilisedTranspose   [1]
+#   DT        fixed time step (adjustTimeStep no); empty = adaptive  []
 #   UNITS     SI | scaled                            [SI]
 #             scaled: same physics in units L0 = R, T0 = mu2 R/sigma,
 #             M0 = sigma T0^2 (R = sigma = mu2 = 1, mu1 = 0.01,
@@ -49,6 +53,10 @@ cmu_list=${CMU:-"legacy 0 0.25 0.5 1 2 4"}
 cRho=${CRHO:-1}
 res=${RES:-128}
 units=${UNITS:-SI}
+visc_list=${VISC:-explicitTranspose}
+cStab=${CSTAB:-1}
+dtFixed=${DT:-}
+if [ -n "$dtFixed" ]; then adjust=no; else adjust=yes; fi
 eps=${EPS:-0.05}
 gfm=${GFM:-off}
 nProcs=${NPROCS:-1}
@@ -112,15 +120,24 @@ FoamFile
 HDR
 }
 
+for visc in $visc_list
+do
 for cmu in $cmu_list
 do
-    case=case_cMu-${cmu}${suffix}
+    case "$visc" in
+        explicitTranspose)   vtag="" ;;
+        stabilisedTranspose) vtag="_stab${cStab}" ;;
+        noTranspose)         vtag="_noT" ;;
+        *) echo "Error: unknown VISC $visc" 1>&2; exit 1 ;;
+    esac
+    dtag=${dtFixed:+_dt$dtFixed}
+    case=case_cMu-${cmu}${vtag}${dtag}${suffix}
     echo "=== $case"
     rm -rf "$case"
     mkdir -p "$case"/system "$case"/constant "$case"/0.orig
 
     # parameters for collect.py
-    echo "R $Rphys mu1 $mu1 mu2 $mu2 sigma $sigma rho1 $rho1 res $res cMu $cmu" \
+    echo "R $Rphys mu1 $mu1 mu2 $mu2 sigma $sigma rho1 $rho1 res $res cMu $cmu visc $visc" \
         > "$case"/caseInfo
 
     # ------------------------------------------------------------- mesh
@@ -206,7 +223,7 @@ startFrom       startTime;
 startTime       0;
 stopAt          endTime;
 endTime         $endTime;
-deltaT          $deltaT0;
+deltaT          ${dtFixed:-$deltaT0};
 writeControl    adjustable;
 writeInterval   $(awk -v t="$endTime" 'BEGIN { printf "%.10g", t/4 }');
 purgeWrite      0;
@@ -217,7 +234,7 @@ timeFormat      general;
 timePrecision   8;
 runTimeModifiable no;
 
-adjustTimeStep  yes;
+adjustTimeStep  $adjust;
 maxCo           0.5;
 maxAlphaCo      0.5;
 maxCapillaryNum 1;
@@ -429,6 +446,8 @@ PIMPLE
     pRefCell        0;
     pRefValue       0;
     ghostFluid      $gfm;
+    viscousStress   $visc;
+    cStab           $cStab;
 }
 EOF
     } > "$case"/system/fvSolution
@@ -475,6 +494,7 @@ EOF
             tail -n 15 log.gfmInterFlow 1>&2
         fi
     )
+done
 done
 
 python3 ./collect.py
