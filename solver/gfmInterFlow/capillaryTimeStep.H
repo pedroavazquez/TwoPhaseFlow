@@ -31,8 +31,8 @@ Description
 
         capillaryTimeStep
         {
-            cRho    1;      // inertial (Brackbill) branch
-            cMu     0.5;    // viscous-capillary branch
+            cRho    0.1;    // inertial (Brackbill) branch
+            cMu     0;      // viscous-capillary branch
             muMode  min;    // min (default) | sum
         }
 
@@ -63,8 +63,12 @@ Description
 {
     const dictionary& capDict = *capDictPtr;
 
-    const scalar cRho = capDict.getOrDefault<scalar>("cRho", 1.0);
-    const scalar cMu = capDict.getOrDefault<scalar>("cMu", 0.5);
+    // Defaults from tests/capillaryDtAxi (mu1/mu2 = 0.01, Oh2 = 8, R/Delta = 16,
+    // CSF + heightFunction, axisymmetric): stable at 0.10 tauRho, unstable at
+    // 0.21 tauRho; with mu1 = mu2 the viscous branch gave no reliable gain
+    // (unstable at dt = 0.06 min(mu) Delta/sigma), so it is off by default.
+    const scalar cRho = capDict.getOrDefault<scalar>("cRho", 0.1);
+    const scalar cMu = capDict.getOrDefault<scalar>("cMu", 0);
 
     // min: the less viscous phase controls the grid-scale capillary modes
     // (tests/capillaryDtAxi: mu1/mu2 = 0.01 is unstable at dt = 0.2 tauRho,

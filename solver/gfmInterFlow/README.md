@@ -250,8 +250,9 @@ Vigneaux, J. Comput. Phys. 227, 2008). Adding to `system/controlDict`
 ```
 capillaryTimeStep
 {
-    cRho    1;      // inertial branch, cRho*tauRho (1 = Brackbill)
-    cMu     0.5;    // viscous branch,  cMu*tauMu
+    cRho    0.1;    // inertial branch, cRho*tauRho (1 = Brackbill)
+    cMu     0;      // viscous branch,  cMu*tauMu (off by default)
+    muMode  min;    // tauMu with min(mu1, mu2) (default) or mu1 + mu2
 }
 maxCapillaryNum 1;  // still applied: deltaT <= maxCapillaryNum*dtCap
 ```
@@ -303,3 +304,19 @@ PIMPLE
 The stabiliser cancels at steady state and adds an O(dt) error
 `~ cStab mu dt lap(dU/dt)`, which tests/capillaryDtAxi measures against the
 small-step reference.
+
+### Calibration (tests/capillaryDtAxi, scaled units, R/Delta = 16)
+
+| case | dt/tauRho | result |
+|---|---|---|
+| mu1/mu2 = 0.01, Oh2 = 8 | 0.046, 0.069, 0.104 | stable, tau/tau_th = 1.025 (all three) |
+| | 0.21, 0.42, 0.83 | unstable after 427, 57, 38 steps |
+| mu1 = mu2 (Oh = 8) | 0.83 | stable |
+| | 3.3, 14, 28 | unstable |
+| mu1/mu2 = 0.01, nOuterCorrectors 3 | 0.83 | unstable after 13 steps |
+| mu1/mu2 = 0.01, ghostFluid on | 0.21 | unstable after 427 steps (as CSF) |
+
+The Brackbill limit is not sufficient for this scheme: use `cRho 0.1`. The
+legacy limit was only stable on wedge meshes because of its Delta bias (~0.03
+tauRho). The explicit transpose viscous term is not involved
+(`viscousStress noTranspose` blows up at the same step).

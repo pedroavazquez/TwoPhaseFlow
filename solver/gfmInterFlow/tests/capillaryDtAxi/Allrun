@@ -38,6 +38,11 @@
 #   DT        list of fixed time steps (adjustTimeStep no) [adaptive]
 #   MU1       override mu1 (e.g. = mu2 for a test without viscosity jump) []
 #   NOUTER    PIMPLE nOuterCorrectors                [1]
+#   GEOM      axi | planar                           [axi]
+#             planar: 2D drop r = R(1 + eps cos 2theta) in a unit box
+#             (128 x 128 at RES 128, empty front/back), same Delta and
+#             physics; tells whether the axis/pole treatment sets the limit.
+#             Only max|U| (gU) is meaningful there (eps uses the P2 moment).
 #   UNITS     SI | scaled                            [SI]
 #             scaled: same physics in units L0 = R, T0 = mu2 R/sigma,
 #             M0 = sigma T0^2 (R = sigma = mu2 = 1, mu1 = 0.01,
@@ -60,6 +65,7 @@ cStab=${CSTAB:-1}
 dt_list=${DT:-adaptive}
 nOuter=${NOUTER:-1}
 mu1User=${MU1:-}
+geom=${GEOM:-axi}
 eps=${EPS:-0.05}
 gfm=${GFM:-off}
 nProcs=${NPROCS:-1}
@@ -94,6 +100,12 @@ xtag=""
 [ -n "$mu1User" ] && xtag="${xtag}_mu1-$mu1User"
 [ "$nOuter" != 1 ] && xtag="${xtag}_nOuter$nOuter"
 [ "$gfm" = on ] && xtag="${xtag}_gfm"
+[ "$geom" = planar ] && xtag="${xtag}_planar"
+case "$geom" in
+    axi)    sideType=wedge; xcBox=0 ;;
+    planar) sideType=empty; xcBox=0.5 ;;
+    *) echo "Error: GEOM must be axi or planar" 1>&2; exit 1 ;;
+esac
 wedgeDeg=5
 
 # geometry in the unit box of the generator, then scaled to SI
@@ -106,6 +118,7 @@ thetaRad=$(awk -v d="$wedgeDeg" 'BEGIN { printf "%.12g", d*atan2(0,-1)/180 }')
 qLin=$(awk -v th="$thetaRad" -v R="$Rphys" \
     'BEGIN { pi = atan2(0,-1); printf "%.12g", th/(2*pi)*4*pi/5*R^5 }')
 ycPhys=$(awk -v y="$yc" -v s="$scale" 'BEGIN { printf "%.12g", y*s }')
+xcPhys=$(awk -v x="$xcBox" -v s="$scale" 'BEGIN { printf "%.12g", x*s }')
 nR=$((res / 2))
 
 [ -f "$gen" ] || { echo "Error: $gen not found" 1>&2; exit 1; }
@@ -152,6 +165,8 @@ do
         > "$case"/caseInfo
 
     # ------------------------------------------------------------- mesh
+    if [ "$geom" = axi ]
+    then
     { header dictionary system blockMeshDict; cat <<EOF
 // unit box (generator geometry), scaled to SI by transformPoints later
 vertices
@@ -178,6 +193,31 @@ boundary
 );
 EOF
     } > "$case"/system/blockMeshDict
+    else
+    { header dictionary system blockMeshDict; cat <<EOF
+// planar unit box, one cell thick, scaled to SI by transformPoints later
+dz $(awk -v n="$res" 'BEGIN { printf "%.12g", 0.5/n }');
+mdz $(awk -v n="$res" 'BEGIN { printf "%.12g", -0.5/n }');
+vertices
+(
+    (0 0 \$mdz) (1 0 \$mdz) (1 1 \$mdz) (0 1 \$mdz)
+    (0 0 \$dz)  (1 0 \$dz)  (1 1 \$dz)  (0 1 \$dz)
+);
+
+blocks
+(
+    hex (0 1 2 3 4 5 6 7) ($res $res 1) simpleGrading (1 1 1)
+);
+
+boundary
+(
+    rim   { type patch; faces ((0 4 7 3) (1 2 6 5) (0 1 5 4) (3 7 6 2)); }
+    front { type empty; faces ((4 5 6 7)); }
+    back  { type empty; faces ((0 3 2 1)); }
+);
+EOF
+    } > "$case"/system/blockMeshDict
+    fi
 
     # ------------------------------------------------------------- fields
     field()
@@ -190,7 +230,7 @@ boundaryField
 {
     rim         { $5 }
     axis        { type empty; }
-    "(front|back)" { type wedge; }
+    "(front|back)" { type $sideType; }
 }
 EOF
         } > "$case"/0.orig/"$1"
@@ -325,6 +365,7 @@ functions
             const vectorField& C = mesh.cellCentres();
 
             const scalar yc = $ycPhys;
+            const scalar xc = $xcPhys;
             const scalar qLin = $qLin;
             const scalar rIn2 = sqr(1.5*$Rphys);
 
@@ -340,7 +381,7 @@ functions
                 const scalar a = alpha[celli];
                 const scalar aV = a*V[celli];
                 const scalar dy = C[celli].y() - yc;
-                const scalar s2 = sqr(C[celli].x()) + sqr(C[celli].z());
+                const scalar s2 = sqr(C[celli].x() - xc) + sqr(C[celli].z());
 
                 if (sqr(dy) + s2 < rIn2)
                 {
@@ -478,9 +519,16 @@ EOF
         # exact volume fractions on the unit box, then scale the mesh
         foamDictionary system/controlDict -entry writeFormat -set ascii > /dev/null
         runApplication -s C0 postProcess -func writeCellCentres -time 0
-        python3 "$here/$gen" 0 "$res" "$Rbox" "$yc" "$wedgeDeg" 2 "$eps" \
-            > log.exactAlphaAxiMode 2>&1 \
-            || { echo "    exactAlphaAxiMode failed:"; cat log.exactAlphaAxiMode; exit 1; }
+        if [ "$geom" = axi ]
+        then
+            python3 "$here/$gen" 0 "$res" "$Rbox" "$yc" "$wedgeDeg" 2 "$eps" \
+                > log.exactAlphaAxiMode 2>&1 \
+                || { echo "    exactAlphaAxiMode failed:"; cat log.exactAlphaAxiMode; exit 1; }
+        else
+            python3 "$here/planarAlpha.py" 0 "$res" "$Rbox" 0.5 "$yc" "$eps" \
+                > log.planarAlpha 2>&1 \
+                || { echo "    planarAlpha failed:"; cat log.planarAlpha; exit 1; }
+        fi
         rm -f 0/C 0/Cx 0/Cy 0/Cz
         foamDictionary system/controlDict -entry writeFormat -set binary > /dev/null
         runApplication transformPoints -scale "$scale"
