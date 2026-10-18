@@ -236,3 +236,45 @@ used only for output (`E`/`ERe`/`EIm`, `rhoERe`/`rhoEIm` with the
 Maxwell-stress force, `electricForce`) are computed only at write times. On
 2D and wedge meshes the gradients of the out-of-plane stress components are
 skipped (they multiply n_k = 0).
+
+## Capillary time-step limit (inertial + viscous)
+
+By default the time step is bounded by the Brackbill limit of the
+surfaceForces library, `deltaT <= maxCapillaryNum * dtBKZ` with
+`dtBKZ = sqrt((rho1 + rho2) Delta^3/(2 pi sigma))`. For viscous flows
+(Oh = mu/sqrt(rho sigma R) >~ 1) this is far too restrictive: grid-scale
+capillary waves are overdamped and the explicit surface tension is stable up
+to a viscous-capillary time `~ (mu1 + mu2) Delta/sigma` (Galusinski &
+Vigneaux, J. Comput. Phys. 227, 2008). Adding to `system/controlDict`
+
+```
+capillaryTimeStep
+{
+    cRho    1;      // inertial branch, cRho*tauRho (1 = Brackbill)
+    cMu     0.5;    // viscous branch,  cMu*tauMu
+}
+maxCapillaryNum 1;  // still applied: deltaT <= maxCapillaryNum*dtCap
+```
+
+switches to (file `capillaryTimeStep.H`, evaluated per interface cell, minimum
+over the interface)
+
+```
+tauRho = sqrt((rho1 + rho2) Delta^3/(2 pi sigma)),   tauMu = (mu1 + mu2) Delta/sigma
+a = cMu tauMu,  b = cRho tauRho,   dtCap = (a + sqrt(a^2 + 4 b^2))/2
+```
+
+which tends to `b` for inviscid and to `a` for Stokes flow. Without the
+dictionary the solver behaves exactly as before.
+
+Delta is the smallest centre-to-centre distance over the internal and coupled
+faces of the cell. The library limit uses `fvc::average(mag(mesh.delta()))`,
+which on wedge meshes includes the wedge faces with patch-normal delta
+`r sin(theta/2)`; for interface cells next to the axis this gives
+`Delta ~ 0.17 dx` and a Brackbill step ~14 times too small. `cMu 0` gives the
+Brackbill limit with the unbiased Delta.
+
+`cMu` has to be calibrated for the scheme (PISO, explicit CSF, isoAdvection):
+`tests/capillaryDtAxi` runs a relaxing mode-2 drop with the physics of the
+co-flow case for several `cMu` and compares the relaxation time, `eps(t)` and
+`max|U|(t)` with the `cMu = 0` run and the Stokes theory.

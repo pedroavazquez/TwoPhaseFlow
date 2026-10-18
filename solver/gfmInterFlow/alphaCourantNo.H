@@ -56,8 +56,24 @@ if (mesh.nInternalFaces())
     meanAlphaCoNum =
         0.5*(gSum(sumPhi)/gSum(mesh.V().field()))*runTime.deltaTValue();
     
-    capillaryNum = runTime.deltaTValue()/surfForces.capillaryDt(rho1,rho2);
+}
 
+// Capillary limit: Galusinski-Vigneaux (inertial + viscous branches) if
+// controlDict has a capillaryTimeStep dictionary, otherwise the original
+// Brackbill limit of the surfaceForces library
+{
+    const dictionary* capDictPtr =
+        runTime.controlDict().findDict("capillaryTimeStep");
+
+    if (capDictPtr)
+    {
+        #include "capillaryTimeStep.H"
+    }
+    else if (mesh.nInternalFaces())
+    {
+        capillaryNum =
+            runTime.deltaTValue()/surfForces.capillaryDt(rho1,rho2);
+    }
 }
 
 Info<< "Interface Courant Number mean: " << meanAlphaCoNum
