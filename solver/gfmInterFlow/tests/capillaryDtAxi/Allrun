@@ -298,17 +298,54 @@ functions
 
             const scalar yc = $ycPhys;
             const scalar qLin = $qLin;
+            const scalar rIn2 = sqr(1.5*$Rphys);
 
-            scalar vol = 0, Q = 0;
+            // drop: cells within 1.5 R of the centre (the P2 moment weights
+            // r^2, so stray alpha far away would bias eps);
+            // debris: everything outside, with its largest alpha and where
+            scalar vol = 0, Q = 0, vDeb = 0;
+            label nDeb = 0;
+            scalar aMaxOut = 0;
+            vector xMaxOut(Zero);
             forAll(C, celli)
             {
-                const scalar aV = alpha[celli]*V[celli];
+                const scalar a = alpha[celli];
+                const scalar aV = a*V[celli];
                 const scalar dy = C[celli].y() - yc;
-                vol += aV;
-                Q += aV*(sqr(dy) - 0.5*(sqr(C[celli].x()) + sqr(C[celli].z())));
+                const scalar s2 = sqr(C[celli].x()) + sqr(C[celli].z());
+
+                if (sqr(dy) + s2 < rIn2)
+                {
+                    vol += aV;
+                    Q += aV*(sqr(dy) - 0.5*s2);
+                }
+                else
+                {
+                    vDeb += aV;
+                    if (a > 1e-12)
+                    {
+                        ++nDeb;
+                    }
+                    if (a > aMaxOut)
+                    {
+                        aMaxOut = a;
+                        xMaxOut = C[celli];
+                    }
+                }
             }
             reduce(vol, sumOp<scalar>());
             reduce(Q, sumOp<scalar>());
+            reduce(vDeb, sumOp<scalar>());
+            reduce(nDeb, sumOp<label>());
+            {
+                // location of the global maximum of alpha outside
+                scalar aMaxG = aMaxOut;
+                reduce(aMaxG, maxOp<scalar>());
+                vector xg = (aMaxOut == aMaxG ? xMaxOut : vector::max);
+                reduce(xg, minOp<vector>());
+                aMaxOut = aMaxG;
+                xMaxOut = xg;
+            }
 
             if (Pstream::master())
             {
@@ -320,11 +357,17 @@ functions
                     mkDir(dir);
                     osPtr_.reset(new OFstream(dir/"dropShape.dat"));
                     osPtr_().precision(12);
-                    osPtr_() << "# Time vol Q eps deltaT" << nl;
+                    osPtr_()
+                        << "# Time vol Q eps deltaT vDebris/vol nDebris"
+                        << " alphaMaxOut rOut yOut" << nl;
                 }
                 osPtr_()
                     << mesh.time().value() << tab << vol << tab << Q << tab
-                    << Q/qLin << tab << mesh.time().deltaTValue() << endl;
+                    << Q/qLin << tab << mesh.time().deltaTValue() << tab
+                    << vDeb/max(vol, VSMALL) << tab << nDeb << tab
+                    << aMaxOut << tab
+                    << Foam::sqrt(sqr(xMaxOut.x()) + sqr(xMaxOut.z())) << tab
+                    << xMaxOut.y() << endl;
             }
         #};
     }

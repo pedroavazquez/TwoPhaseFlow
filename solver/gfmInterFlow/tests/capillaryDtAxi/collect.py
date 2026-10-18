@@ -17,6 +17,10 @@ SI and scaled runs are directly comparable:
   Ulate     max|U| over the last 20 % of the run relative to its peak;
             the physical flow decays like eps, so values ~1 flag growth
 
+Debris (alpha outside 1.5 R from the drop centre, newer cases only):
+  first time with any cell alpha > 1e-12 outside, max vDebris/vDrop,
+  max number of such cells, and the largest outside alpha with its (r, y)/R
+
 Theory (small deformation, Stokes, unbounded outer fluid):
   tau_th = (mu2 R/sigma) (2 lam + 3)(19 lam + 16) / (40 (lam + 1)),  lam = mu1/mu2
 
@@ -100,6 +104,8 @@ def load(case):
     p["t"] = [r[0] for r in ds]
     p["eps"] = [r[3] for r in ds]
     p["dt"] = [r[4] for r in ds]
+    # debris columns (cases made after the dropShape update)
+    p["deb"] = [r[5:10] for r in ds if len(r) >= 10]
     p["tm"] = [r[0] for r in mm]
     p["um"] = [max(r[1:]) for r in mm]
     return p
@@ -150,6 +156,21 @@ for c in cases:
     print(f"{c:22s} {dt_med/d['tauMu']:9.3e} {dt_med/d['tauRho']:9.3e} {len(t):7d} "
           f"{t[-1]/th:6.2f} {tau/th:7.4f} {tau/tau_ref:7.4f} {dev:8.2e} "
           f"{ulate:8.2e}  {status}")
+
+print()
+print(f"{'case':22s} {'tFirst':>7s} {'vDeb/vDrop':>11s} {'nDeb':>6s} "
+      f"{'alphaMaxOut':>12s} {'at r/R':>7s} {'y/R':>7s}   (debris outside 1.5 R)")
+for c in cases:
+    d = data.get(c)
+    if d is None or not d.get("deb"):
+        continue
+    th, R = d["tau_th"], d["R"]
+    tdeb = [ti for ti, r in zip(d["t"], d["deb"]) if r[1] > 0]
+    imax = max(range(len(d["deb"])), key=lambda i: d["deb"][i][2])
+    rm = d["deb"][imax]
+    print(f"{c:22s} {(tdeb[0]/th if tdeb else float('nan')):7.3f} "
+          f"{max(r[0] for r in d['deb']):11.3e} {int(max(r[1] for r in d['deb'])):6d} "
+          f"{rm[2]:12.3e} {rm[3]/R:7.3f} {rm[4]/R:7.3f}")
 
 if "--plot" in sys.argv:
     try:
