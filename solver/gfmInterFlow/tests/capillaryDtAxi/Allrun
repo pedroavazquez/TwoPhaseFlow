@@ -32,6 +32,12 @@
 #   GFM       ghostFluid switch                      [off]
 #   NPROCS    MPI ranks per run                      [1]
 #   TIMEOUT   wall-clock limit per run [s]           [7200]
+#   UNITS     SI | scaled                            [SI]
+#             scaled: same physics in units L0 = R, T0 = mu2 R/sigma,
+#             M0 = sigma T0^2 (R = sigma = mu2 = 1, mu1 = 0.01,
+#             rho = sigma R rho/mu2^2 = 1/Oh2^2 = 0.015). Cases get the
+#             suffix _scaled. Checks that the solver is unit independent
+#             (absolute tolerances in the geometric VoF code).
 #------------------------------------------------------------------------------
 cd "${0%/*}" || exit 1
 . "${WM_PROJECT_DIR:?}"/bin/tools/RunFunctions
@@ -42,17 +48,36 @@ here=$(pwd)
 cmu_list=${CMU:-"legacy 0 0.25 0.5 1 2 4"}
 cRho=${CRHO:-1}
 res=${RES:-128}
-endTime=${ENDTIME:-4e-3}
+units=${UNITS:-SI}
 eps=${EPS:-0.05}
 gfm=${GFM:-off}
 nProcs=${NPROCS:-1}
 tmax=${TIMEOUT:-7200}
 
-# physics (SI)
-Rphys=30e-6
-rho1=1000; rho2=1000
-mu1=1e-3;  mu2=0.1
-sigma=5e-3
+# physics
+case "$units" in
+SI)
+    Rphys=30e-6
+    rho1=1000; rho2=1000
+    mu1=1e-3;  mu2=0.1
+    sigma=5e-3
+    endTime=${ENDTIME:-4e-3}
+    deltaT0=1e-8
+    suffix=""
+    ;;
+scaled)
+    Rphys=1
+    rho1=0.015; rho2=0.015
+    mu1=0.01;   mu2=1
+    sigma=1
+    endTime=${ENDTIME:-6.6667}      # = 4e-3 s / (mu2 R/sigma = 6e-4 s)
+    deltaT0=1.6667e-5               # = 1e-8 s / 6e-4 s
+    suffix=_scaled
+    ;;
+*)
+    echo "Error: UNITS must be SI or scaled" 1>&2; exit 1
+    ;;
+esac
 wedgeDeg=5
 
 # geometry in the unit box of the generator, then scaled to SI
@@ -69,7 +94,7 @@ nR=$((res / 2))
 
 [ -f "$gen" ] || { echo "Error: $gen not found" 1>&2; exit 1; }
 
-echo "capillaryDtAxi: cMu [$cmu_list], cRho $cRho, RES $res (R/Delta = $((res/8))), eps $eps"
+echo "capillaryDtAxi: cMu [$cmu_list], cRho $cRho, RES $res (R/Delta = $((res/8))), eps $eps, units $units"
 
 header()
 {
@@ -89,10 +114,14 @@ HDR
 
 for cmu in $cmu_list
 do
-    case=case_cMu-${cmu}
+    case=case_cMu-${cmu}${suffix}
     echo "=== $case"
     rm -rf "$case"
     mkdir -p "$case"/system "$case"/constant "$case"/0.orig
+
+    # parameters for collect.py
+    echo "R $Rphys mu1 $mu1 mu2 $mu2 sigma $sigma rho1 $rho1 res $res cMu $cmu" \
+        > "$case"/caseInfo
 
     # ------------------------------------------------------------- mesh
     { header dictionary system blockMeshDict; cat <<EOF
@@ -177,7 +206,7 @@ startFrom       startTime;
 startTime       0;
 stopAt          endTime;
 endTime         $endTime;
-deltaT          1e-8;
+deltaT          $deltaT0;
 writeControl    adjustable;
 writeInterval   $(awk -v t="$endTime" 'BEGIN { printf "%.10g", t/4 }');
 purgeWrite      0;
